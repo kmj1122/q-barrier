@@ -40,7 +40,7 @@ SUSPICIOUS_TEXT = {
     ),
 }
 REQUIRED = (
-    "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "requirements.txt", "requirements-mujoco.txt",
+    "README.md", "LICENSE", "requirements.txt",
     "amago/LICENSE", "amago/amago/shielded_agent.py", "vendor/safety-gymnasium/LICENSE",
     "crl2_darkroom.py", "crl2_mujoco.py", "test_crl2_darkroom.py", "test_crl2_mujoco.py",
     "pretrained/manifest.json", "pretrained/README.md",

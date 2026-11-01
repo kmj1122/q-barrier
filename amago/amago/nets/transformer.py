@@ -441,8 +441,10 @@ class SigmaReparam(nn.Linear):
             v = torch.randn(d_in, device=self.weight.device, dtype=self.weight.dtype)
             u = u / u.norm(dim=0)
             v = v / v.norm(dim=0)
-        self.register_buffer("u", u)
-        self.register_buffer("v", v)
+        # SVD rows are views into larger storage. Compact buffers preserve their
+        # values while allowing safetensors to restore a freshly initialized model.
+        self.register_buffer("u", u.clone(memory_format=torch.contiguous_format))
+        self.register_buffer("v", v.clone(memory_format=torch.contiguous_format))
         self.gamma = nn.Parameter(torch.ones(1), requires_grad=True)
 
     def forward(self, x):

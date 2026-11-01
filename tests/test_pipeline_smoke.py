@@ -218,3 +218,91 @@ def test_checkpoint_incompatible_critic_count_is_rejected(tmp_path):
     path = Path(original.ckpt_dir) / "policy_weights/policy_epoch_0.pt"
     with pytest.raises(RuntimeError, match="size mismatch"):
         incompatible.load_checkpoint_from_path(str(path), is_accelerate_state=False)
+
+
+@pytest.mark.parametrize("fast_init", [False, True])
+def test_sigma_buffers_have_compact_storage_for_safetensors(monkeypatch, fast_init):
+    from amago.nets.transformer import SigmaReparam
+
+    # Exercise SVD initialization even on hosts that normally use fast-init.
+    monkeypatch.setattr("amago.nets.transformer._cpu_supports_avx512", lambda: True)
+    layer = SigmaReparam(8, 24, fast_init=fast_init)
+    for buffer in (layer.u, layer.v):
+        assert buffer.is_contiguous()
+        assert buffer.storage_offset() == 0
+        assert buffer.untyped_storage().nbytes() == buffer.numel() * buffer.element_size()
+
+
+@pytest.mark.parametrize("continuous", [False, True])
+def test_full_training_state_restores_optimizer_scheduler_and_rng(tmp_path, monkeypatch, continuous):
+    import random
+
+    monkeypatch.setattr("amago.nets.transformer._cpu_supports_avx512", lambda: True)
+    random.seed(123)
+    np.random.seed(123)
+    torch.manual_seed(123)
+    original = make_experiment(tmp_path / "original", continuous)
+    original.train_step(make_batch(continuous).to(original.DEVICE), log_step=True)
+    original.save_checkpoint()
+    state_path = Path(original.ckpt_dir) / "training_states/synthetic-smoke_epoch_0"
+    expected_python = random.random()
+    expected_numpy = np.random.random()
+    expected_torch = torch.rand(4)
+    expected_optimizer = original.optimizer.state_dict()
+    expected_scheduler = original.lr_schedule.state_dict()
+
+    restored = make_experiment(tmp_path / "restored", continuous)
+    safe_globals_before = set(torch.serialization.get_safe_globals())
+    restored.load_checkpoint_from_path(str(state_path), is_accelerate_state=True)
+    assert set(torch.serialization.get_safe_globals()) == safe_globals_before
+    assert random.random() == expected_python
+    assert np.random.random() == expected_numpy
+    torch.testing.assert_close(torch.rand(4), expected_torch, atol=0, rtol=0)
+    for name, value in original.policy.state_dict().items():
+        assert torch.equal(value, restored.policy.state_dict()[name]), name
+    actual_optimizer = restored.optimizer.state_dict()
+    assert actual_optimizer["param_groups"] == expected_optimizer["param_groups"]
+    assert actual_optimizer["state"].keys() == expected_optimizer["state"].keys()
+    for parameter_id, values in expected_optimizer["state"].items():
+        for name, value in values.items():
+            actual = actual_optimizer["state"][parameter_id][name]
+            if isinstance(value, torch.Tensor):
+                assert torch.equal(value, actual), name
+            else:
+                assert value == actual
+    assert restored.lr_schedule.state_dict() == expected_scheduler
+
+    before = restored.policy.dyn_z_w1.weight.detach().clone()
+    metrics = restored.train_step(make_batch(continuous).to(restored.DEVICE), log_step=True)
+    assert torch.isfinite(metrics["Actor Loss"]) and torch.isfinite(metrics["Critic Loss"])
+    assert not torch.equal(before, restored.policy.dyn_z_w1.weight)
+    assert {int(v["step"]) for v in restored.optimizer.state_dict()["state"].values()} == {2}
+
+
+@pytest.mark.parametrize("preexisting", [False, True])
+@pytest.mark.parametrize("load_fails", [False, True])
+def test_legacy_rng_dtype_scope_preserves_caller_allowlist(monkeypatch, preexisting, load_fails):
+    import amago.experiment as experiment_module
+
+    dtype = type(np.dtype(np.uint32))
+    initial = set(torch.serialization.get_safe_globals())
+    # Simulate the legacy API locally without changing NumPy for other modules.
+    monkeypatch.setattr(experiment_module, "np", SimpleNamespace(dtype=np.dtype, uint32=np.uint32))
+
+    def load_state(path):
+        assert path == "unused-by-observer"
+        assert dtype in torch.serialization.get_safe_globals()
+        if load_fails:
+            raise RuntimeError("deliberate load failure")
+
+    observed = SimpleNamespace(accelerator=SimpleNamespace(print=lambda *args: None, load_state=load_state))
+    additions = [dtype] if preexisting and dtype not in initial else []
+    with torch.serialization.safe_globals(additions):
+        before = set(torch.serialization.get_safe_globals())
+        if load_fails:
+            with pytest.raises(RuntimeError, match="deliberate load failure"):
+                Experiment.load_checkpoint_from_path(observed, "unused-by-observer", is_accelerate_state=True)
+        else:
+            Experiment.load_checkpoint_from_path(observed, "unused-by-observer", is_accelerate_state=True)
+        assert set(torch.serialization.get_safe_globals()) == before
+    assert set(torch.serialization.get_safe_globals()) == initial

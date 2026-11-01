@@ -117,7 +117,8 @@
   "csv_only_reproduction": {
     "script": "scripts/plot_main_figures.py",
     "script_sha256": "1190cc8964fc16d270707f17d892915c13df9a3d7cbdb2003987001828dadbeb",
-    "requirements": "requirements-plot.txt",
+    "requirements": "requirements.txt",
+    "requirements_scope": "Unified project installation; historical CSV-only validation used NumPy and Matplotlib without RL packages",
     "matplotlib_version": "3.9.2",
     "fresh_environment_succeeded": true,
     "requires_rl_packages": false,

@@ -397,7 +397,13 @@ class Experiment:
             ckpt = utils.retry_load_checkpoint(path, map_location=self.DEVICE)
             self.policy.load_state_dict(ckpt)
         else:
-            self.accelerator.load_state(path)
+            # Accelerate's RNG allowlist covers NumPy >=1.25 but not the legacy
+            # uint32 dtype used by the pinned Robotics/NumPy 1.23 environment.
+            rng_dtypes = [type(np.dtype(np.uint32))] if not hasattr(np, "dtypes") else []
+            # safe_globals removes its additions on exit; retain caller permissions.
+            rng_dtypes = [dtype for dtype in rng_dtypes if dtype not in torch.serialization.get_safe_globals()]
+            with torch.serialization.safe_globals(rng_dtypes):
+                self.accelerator.load_state(path)
 
     def load_checkpoint(self, epoch: int, resume_training_state: bool = True) -> None:
         """Load a historical checkpoint from the `ckpts` directory of this experiment.

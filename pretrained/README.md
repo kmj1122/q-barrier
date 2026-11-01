@@ -25,7 +25,7 @@ DarkRoom `shield_darkroom_later` evaluation and the continuous-task Q2 margin
 diagnostics. They are not an assertion of exact main-figure reproduction.
 They retain the historical budget semantics and critic aggregation rather
 than silently changing them to match a paper description. See
-[`docs/CONFIGURATION.md`](../docs/CONFIGURATION.md).
+[the configuration notes](../README.md#configuration).
 
 ## Check loading without running an evaluation
 

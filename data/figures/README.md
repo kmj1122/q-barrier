@@ -71,13 +71,13 @@ relicensing of the underlying third-party experiment archives.
 From the repository root:
 
 ```bash
-python -m pip install -r requirements-plot.txt
+python -m pip install -r requirements.txt
 python scripts/plot_main_figures.py
 ```
 
 The standalone script uses only this directory's CSVs, NumPy and Matplotlib.
 It does not import the RL implementation or require the original research
-checkout. The plotting requirements pin Matplotlib3.9.2, matching the backend
+checkout. The unified requirements pin Matplotlib3.9.2, matching the backend
 version recorded in the archived PDFs. Optional SciencePlots styles are not
 activated because the archived figures use default DejaVu Sans styling.
 
@@ -86,9 +86,11 @@ Outputs are `outputs/main_figures/RQ1_aggregated.{pdf,png}` and
 `reproduction_checks.json` checks all1,440 curve coordinates and all100
 shading polygons against the CSVs, with zero numerical discrepancy.
 
-Verification also succeeded from a separate directory containing only the
+Earlier CSV-only verification also succeeded from a separate directory containing only the
 plotting script and two CSVs, in a fresh environment without Torch, AMAGO,
-Safety-Gymnasium or pandas. Fonts, labels, colors and plotted quantities
+Safety-Gymnasium or pandas. That historical minimal environment is not the
+unified installation above, which includes all project dependencies. Fonts,
+labels, colors and plotted quantities
 match the archived figures. Small renderer/layout differences remain;
 the regenerated PDFs are not byte-identical to the originals. This
 reproduction preserves the uncertainty limitations described above.
