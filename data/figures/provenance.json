@@ -1,0 +1,141 @@
+{
+  "purpose": "Archived plotted coordinates and shading widths for main-paper figures; not new experimental results",
+  "uncertainty": "std preserves the archived shading half-width. Do not infer raw SD, independent-rollout SEM, or training-seed uncertainty; see README.md.",
+  "raw_data_included": false,
+  "smoothing_or_rescaling_during_copy": false,
+  "RQ1": {
+    "csv_file": "RQ1_aggregated_plot_values.csv",
+    "csv_sha256": "897ab5d420db43f4e7f4c962cebb85fdd16a1941e871b1fcef87cc8cb50140c1",
+    "source_csv_name": "RQ1_aggregated_plot_values.csv",
+    "byte_identical_to_archived_csv": true,
+    "rows": 1000,
+    "columns": [
+      "rq",
+      "environment",
+      "environment_display",
+      "algorithm",
+      "algorithm_display",
+      "metric",
+      "metric_label",
+      "x_name",
+      "x_value",
+      "mean",
+      "std",
+      "source_mean_column",
+      "source_std_column",
+      "notes"
+    ],
+    "curve_count": 50,
+    "environments": [
+      "DarkRoomCMDP-v0",
+      "SafetyAntVelocitySample-v0",
+      "SafetyCarGoal1-v0",
+      "SafetyHalfCheetahVelocitySample-v0",
+      "SafetyPointGoal1-v0"
+    ],
+    "algorithms": [
+      "cad",
+      "maml",
+      "safemeta",
+      "scared",
+      "shield"
+    ],
+    "metric_values": [
+      "raw_cost",
+      "return"
+    ],
+    "plotting_script": "plot_rq1.py",
+    "plotting_script_sha256": "0ebff26da19de0caedef5111c2c3dfe884db2db66fea6fe3f29c81265e486c8c",
+    "figure_pdf_name": "RQ1_aggregated.pdf",
+    "archived_pdf_sha256": "feeca8c5515005c6a85d7426f0d768aa2764fb2313bcb1acb096125700aaa421",
+    "paper_asset_sha256": "dc85411aa39ffe151113ba73d54ad2071e57a30ecf2c38bec6e8eebe20bf596f",
+    "paper_asset_match": "PDF bytes identical after removing only /CreationDate metadata",
+    "normalized_pdf_sha256": "daca2b4224ce9d98867b4f60ae1d2a37c7867b1ba8b3adbcad83bcf809108dbd",
+    "transformation_notes_counts": {
+      "": 940,
+      "reward_scale=0.1": 30,
+      "cost_scale=0.5": 30
+    }
+  },
+  "RQ2": {
+    "csv_file": "RQ2_aggregated_plot_values.csv",
+    "csv_sha256": "7f608c95bc3430a582988c8c59f9616f2a5afac871e5587b43d70b1774c0964a",
+    "source_csv_name": "RQ2_aggregated_plot_values.csv",
+    "byte_identical_to_archived_csv": true,
+    "rows": 440,
+    "columns": [
+      "rq",
+      "environment",
+      "environment_display",
+      "algorithm",
+      "algorithm_display",
+      "metric",
+      "metric_label",
+      "x_name",
+      "x_value",
+      "mean",
+      "std",
+      "source_mean_column",
+      "source_std_column",
+      "notes"
+    ],
+    "curve_count": 50,
+    "environments": [
+      "DarkRoomCMDP-v0",
+      "SafetyAntVelocitySample-v0",
+      "SafetyCarGoal1-v0",
+      "SafetyHalfCheetahVelocitySample-v0",
+      "SafetyPointGoal1-v0"
+    ],
+    "algorithms": [
+      "cad",
+      "maml",
+      "safemeta",
+      "scared",
+      "shield"
+    ],
+    "metric_values": [
+      "cost",
+      "return"
+    ],
+    "plotting_script": "plot_rq2.py",
+    "plotting_script_sha256": "18e7a1ed4e1005cdea2a6525aad9904709424e8fccbfa0f6434b0701e9c97665",
+    "figure_pdf_name": "RQ2_aggregated.pdf",
+    "archived_pdf_sha256": "3f3ea03b054cad40c1ff22d32655eb62af948d03afb6c23837d538d48d586698",
+    "paper_asset_sha256": "eb1ad9a03947543b34b503b66099741d2ebbf6ac0155192b2c65000c7a2c8423",
+    "paper_asset_match": "PDF bytes identical after removing only /CreationDate metadata",
+    "normalized_pdf_sha256": "5ba0cfb1c1f32077a2dcfdadba263dd200644ee29f7e489e8b482f2bc6b6980f",
+    "transformation_notes_counts": {
+      "": 252,
+      "rq2_scale=0.5;reward_scale=2": 4,
+      "reward_scale=0.5": 81,
+      "rq2_scale=0.5;cost_scale=2": 4,
+      "cost_scale=0.5": 81,
+      "reward_scale=0.1": 18
+    }
+  },
+  "csv_only_reproduction": {
+    "script": "scripts/plot_main_figures.py",
+    "script_sha256": "1190cc8964fc16d270707f17d892915c13df9a3d7cbdb2003987001828dadbeb",
+    "requirements": "requirements-plot.txt",
+    "matplotlib_version": "3.9.2",
+    "fresh_environment_succeeded": true,
+    "requires_rl_packages": false,
+    "portable_three_file_package_succeeded": true,
+    "line_and_band_errors_against_csv": {
+      "RQ1": 0.0,
+      "RQ2": 0.0
+    },
+    "rendered_curve_counts": {
+      "RQ1": 50,
+      "RQ2": 50
+    },
+    "labels_match_paper_exactly": true,
+    "maximum_text_position_difference_points": {
+      "RQ1": 0.636962890625,
+      "RQ2": 0.609375
+    },
+    "not_byte_identical_to_paper": true,
+    "uncertainty_warning": "Reproduces archived shading, not independently corrected uncertainty"
+  }
+}

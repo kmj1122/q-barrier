@@ -1,0 +1,114 @@
+# Shield toggle
+use_shield: false # Toggle this to switch between ShieldedAMAGOAgent and AMAGOAgent
+base_run_name: "darkroom_amago"
+# Dynamic name component
+shield_suffix: ${eval:'"shield" if ${use_shield} else "no_shield"'}
+
+run_name: "${base_run_name}-${shield_suffix}-${now:%m%d-%H%M%S}"
+ckpt_base_dir: "./checkpoints"
+use_wandb: false
+wandb_project: "q-barrier"
+exclude_cost_to_go_from_encoder: false  # Keep ctg available to the shield, but exclude it from the learned latent when true
+
+env_name: "DarkRoomHard-v0"
+
+# Shield configuration (only active when use_shield: true)
+shield_config:
+  # Runtime filtering
+  shield_alpha: 1.25          # Multiplier for the cost budget threshold
+  shield_safety_margin: 0.0   # Constant safety margin (subtracted from threshold)
+  shield_fallback: "policy" # Action selection if no safe action is found (min_cost or policy)
+  shield_warmup_epochs: 0     # Disable shielding for the first N epochs of training
+  shield_critic_agg: "mean"  # Aggregate cost critics with max, mean, min, or quantile
+  shield_filter_mode: "soft" # Hard mask or soft downweighting of risky actions
+  shield_soft_beta: 1.0      # Higher values make soft filtering closer to a hard mask
+  shield_score_mode: "barrier" # Alternative scoring rules: cost_penalty or budget_penalty
+  shield_log_margins: false    # Log the executed action's barrier margin and budget
+  shield_critic_quantile: 0.75 # Used only when shield_critic_agg = quantile
+  shield_uncertainty_mode: "std" # none, std, or quantile_spread for Delta_t(a)
+  shield_uncertainty_kappa: 1.0  # Scale of uncertainty radius Delta_t(a)
+  shield_uncertainty_q_hi: 0.9   # Used only when shield_uncertainty_mode = quantile_spread
+  shield_uncertainty_q_lo: 0.1   # Used only when shield_uncertainty_mode = quantile_spread
+  shield_uncertainty_min: 0.0    # Optional lower clamp for Delta_t(a)
+  shield_uncertainty_max: null   # Optional upper clamp for Delta_t(a)
+  
+  # Auxiliary training
+  use_world_model_aux: true   # Enable world-model and shield-related training
+  wm_hidden_dim: 256          # Hidden dimension for dynamics heads
+  wm_nll_weight: 1.0          # Weight for next-state NLL loss
+  wm_loss_weight: 1.0         # Global weight for the world model (z, r, c)
+  cbf_smoothness_weight: 0.0  # Weight for CBF-latent smoothness regularization
+  latent_distill_weight: 0.1  # Weight for distilling world latent into policy latent
+  rnd_loss_weight: 0.00       # Weight for RND novelty training
+  epsilon_calib_weight: 0.05  # Weight for epsilon-calibration (sigma -> conjugacy margin)
+  epsilon_calib_quantile: 0.95
+  gamma_conjugacy_weight: 0.1 # Weight for enforcing Bellman transition consistency
+  cbf_collapse_weight: 0.1    # Penalty to prevent CBF latent collapse
+  detach_structural_losses: true
+
+grid_size: 17
+env_mode: "sync"
+num_train_goals: 250
+num_test_goals: 10
+time_limit: 30
+max_inner_episodes: 50
+replay_capacity: 100000
+seed: 42
+deterministic: true
+dloader_workers: 6
+
+constrained_env_config:
+  # cost_seed: 42
+  cost_seed: dynamic
+  cost_num: 100
+  cost_cost: 0.1
+  min_cost_to_go: 0.1
+  max_cost_to_go: 1.5
+  empty_radius: 1 # only for goals, not cost
+  guranatee_path: true
+  reset_to_new_cost: true
+  fix_map_across_budgets: false
+  train_radial_alpha: -0.5
+  exclude_goal_and_start_from_cost: false
+
+constrained_agent_config:
+  fixed_lagrangian_multiplier: 2
+  # fixed_lagrangian_multiplier: null
+
+  # If not fixed lambda:
+  lambda_lr: 3e-5
+  lambda_init: 0.0
+  lambda_upper_bound: null
+
+  max_unused_fraction: 1
+
+  apply_cost_violation_mask: true
+
+
+max_seq_len: ${eval:'${time_limit} * ${max_inner_episodes}'}
+embedding_dim: 64
+hidden_dim: 64
+num_layers: 4
+num_heads: 8
+
+epochs: 10000
+batch_size: 32
+learning_rate: 3e-4
+train_timesteps_per_epoch: ${eval:'${time_limit} * ${max_inner_episodes}'}
+train_batches_per_epoch: 1000
+val_timesteps_per_epoch: ${eval:'${time_limit} * ${max_inner_episodes}'}
+mixed_precision: "no"
+start_learning_at_epoch: 5
+
+val_interval: 10
+ckpt_interval: 10
+load_checkpoint_path: null
+load_checkpoint_is_accelerate_state: false
+load_checkpoint_epoch: null
+resume_from_epoch: null
+resume_training_state: true
+
+# Hydra configuration to set output directory
+hydra:
+  run:
+    dir: ${ckpt_base_dir}/${run_name}

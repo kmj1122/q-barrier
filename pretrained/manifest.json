@@ -1,0 +1,83 @@
+{
+  "format": 1,
+  "scope": "Existing trusted policy-only release aliases; not optimizer states or new experiments",
+  "source_directory": "best_checkpoints",
+  "epoch_note": "reported_epoch comes from the historical checkpoints.txt sidecar. Only DarkRoom was independently matched to its original epoch file; other training identities remain unverified.",
+  "preset_note": "Presets preserve archived evaluation settings, not verified training configurations or a guarantee of reproducing the main figures.",
+  "files": [
+    {
+      "path": "pretrained/darkroom.pt",
+      "bytes": 28184355,
+      "sha256": "007631e1a1c895204fc3273e8ea4cc71c2e244c7de9ea85ca5e432d64243558f",
+      "environment": "DarkRoomHard-v0",
+      "reported_epoch": 2100,
+      "training_epoch_verified": true,
+      "training_seed_verified": 42,
+      "training_context_steps_verified": 1500,
+      "exact_training_checkpoint": "checkpoints/darkroom_both_off-shield-0307-163232/ckpts/policy_weights/policy_epoch_2100.pt",
+      "training_config_source": "checkpoints/darkroom_both_off-shield-0307-163232/.hydra/config.yaml",
+      "evaluation_preset": "pretrained/darkroom.yaml",
+      "evaluation_config_source": "checkpoints/shield_darkroom_later/.hydra/config.yaml",
+      "evaluation_context_steps": 1500,
+      "evaluation_seed": 42
+    },
+    {
+      "path": "pretrained/point.pt",
+      "bytes": 27438883,
+      "sha256": "eb7ee0998499d4b0231e386b9d4f3777f1413a211b3f4ec1cca3cbd1dcb0b025",
+      "environment": "SafetyPointGoal1-v0",
+      "reported_epoch": 2968,
+      "training_epoch_verified": false,
+      "training_seed_verified": null,
+      "training_context_steps_verified": null,
+      "evaluation_preset": "pretrained/point.yaml",
+      "evaluation_config_source": "checkpoints/eval_q2_margins_point/.hydra/config.yaml",
+      "evaluation_context_steps": 1500,
+      "evaluation_seed": 42
+    },
+    {
+      "path": "pretrained/car.pt",
+      "bytes": 27463587,
+      "sha256": "3c4d49ea6184c515ccc02277c850056c0461f1e1044df5dd860293386eb9c5f5",
+      "environment": "SafetyCarGoal1-v0",
+      "reported_epoch": 2996,
+      "training_epoch_verified": false,
+      "training_seed_verified": null,
+      "training_context_steps_verified": null,
+      "evaluation_preset": "pretrained/car.yaml",
+      "evaluation_config_source": "checkpoints/eval_q2_margins_car/.hydra/config.yaml",
+      "evaluation_context_steps": 1500,
+      "evaluation_seed": 42,
+      "identity_caution": "The alias differs from the similarly named training-run epoch2996 file; that file was not substituted."
+    },
+    {
+      "path": "pretrained/ant.pt",
+      "bytes": 27785891,
+      "sha256": "9c47320f848cf19bccbb0729997429c387bf49deab83fd315d52e28f665db05f",
+      "environment": "SafetyAntVelocity-v1",
+      "reported_epoch": 1834,
+      "training_epoch_verified": false,
+      "training_seed_verified": null,
+      "training_context_steps_verified": null,
+      "evaluation_preset": "pretrained/ant.yaml",
+      "evaluation_config_source": "checkpoints/eval_q2_margins_ant/.hydra/config.yaml",
+      "evaluation_context_steps": 2000,
+      "evaluation_seed": 42
+    },
+    {
+      "path": "pretrained/cheetah.pt",
+      "bytes": 27651997,
+      "sha256": "16322f0d6196025227010041f5100369895828e805483b07c940b0ca98281074",
+      "environment": "SafetyHalfCheetahVelocity-v1",
+      "reported_epoch": 70,
+      "training_epoch_verified": false,
+      "training_seed_verified": null,
+      "training_context_steps_verified": null,
+      "evaluation_preset": "pretrained/cheetah.yaml",
+      "evaluation_config_source": "checkpoints/eval_q2_margins_cheetah/.hydra/config.yaml",
+      "evaluation_context_steps": 2000,
+      "evaluation_seed": 42,
+      "identity_caution": "The alias differs from all four located candidate epoch70 files; none was substituted."
+    }
+  ]
+}

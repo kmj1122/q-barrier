@@ -1,0 +1,18 @@
+# Core implementation. Install from the repository root using Python 3.10.
+torch==2.10.0
+numpy>=1.23.5,<3
+gymnasium==0.29.0
+hydra-core==1.3.2
+omegaconf==2.3.0
+gin-config==0.5.0
+accelerate==1.12.0
+wandb==0.25.0
+einops==0.8.2
+tqdm>=4.66
+termcolor>=2.4
+huggingface-hub==1.4.1
+Pillow>=10
+imageio>=2.27
+matplotlib>=3.7
+opencv-python-headless==4.11.0.86
+-e ./amago

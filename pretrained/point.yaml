@@ -1,0 +1,91 @@
+# Portable evaluation settings from archived eval_q2_margins_point; not training metadata.
+use_shield: true
+base_run_name: mujoco_amago
+shield_suffix: ${eval:'"shield" if ${use_shield} else "no_shield"'}
+run_name: pretrained_point
+ckpt_base_dir: ./outputs/evaluation
+use_wandb: false
+wandb_project: q-barrier
+exclude_cost_to_go_from_encoder: false
+env_name: SafetyPointGoal1-v0
+sample_actions: true
+shield_config:
+  shield_alpha: 1.5
+  shield_safety_margin: 0.0
+  shield_fallback: policy
+  shield_warmup_epochs: 0
+  shield_critic_agg: mean
+  shield_filter_mode: soft
+  shield_score_mode: barrier
+  shield_log_margins: true
+  shield_soft_beta: 1.0
+  shield_critic_quantile: 0.75
+  shield_continuous_num_samples: 8
+  shield_continuous_enable_fast_path: true
+  shield_continuous_mean_exit_margin: 0.0
+  shield_continuous_stage1_num_samples: 3
+  shield_continuous_sampling_scheme: structured
+  shield_continuous_wide_scale: 2.5
+  use_world_model_aux: true
+  wm_hidden_dim: 256
+  wm_nll_weight: 1.0
+  wm_loss_weight: 1.0
+  cbf_smoothness_weight: 0.0
+  latent_distill_weight: 0.1
+  rnd_loss_weight: 0.0
+  epsilon_calib_weight: 0.05
+  epsilon_calib_quantile: 0.95
+  gamma_conjugacy_weight: 0.1
+  cbf_collapse_weight: 0.1
+  detach_structural_losses: true
+env_mode: async
+num_train_goals: 20
+num_test_goals: 10
+time_limit: 75
+max_inner_episodes: 20
+sticky_movement_multiplier: 5
+lidar: false
+normalize_reward: true
+replay_capacity: 100000
+seed: 42
+deterministic: true
+dloader_workers: 6
+reward_multiplier: 10
+cost_multiplier: 0.1
+constrained_env_config:
+  train_radial_alpha: -0.3
+  min_ctg: 10.0
+  max_ctg: 50.0
+constrained_agent_config:
+  fixed_lagrangian_multiplier: 4
+  lambda_lr: 3.0e-05
+  lambda_init: 0.0
+  lambda_upper_bound: null
+  max_unused_fraction: 1
+max_seq_len: 1500
+embedding_dim: 64
+hidden_dim: 64
+num_layers: 4
+num_heads: 8
+epochs: 5000
+batch_size: 32
+learning_rate: 0.0003
+train_timesteps_per_epoch: ${max_seq_len}
+train_batches_per_epoch: 1000
+val_timesteps_per_epoch: ${max_seq_len}
+mixed_precision: 'no'
+start_learning_at_epoch: 0
+val_interval: 3
+ckpt_interval: 1
+load_checkpoint_path: ./pretrained/point.pt
+load_checkpoint_is_accelerate_state: false
+load_checkpoint_epoch: null
+resume_from_epoch: null
+resume_training_state: true
+load_run_name: ${run_name}
+load_ckpt_base_dir: ${ckpt_base_dir}
+no_video: true
+save_gifs: false
+save_metrics: true
+metrics_file_name: inner_episode_trends.npz
+task_type: goal

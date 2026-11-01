@@ -1,0 +1,137 @@
+# ============================================================================
+# ESSENTIAL EVALUATION CONFIGURATION - test_crl2_darkroom.py
+# ============================================================================
+
+# -------------------- CHECKPOINT & EVALUATION --------------------
+# The most important settings for evaluation
+use_shield: false
+ckpt_base_dir: "./checkpoints"                # Where to find trained models
+load_checkpoint_path: null
+load_checkpoint_epoch: null                    # Prefer an explicit load_checkpoint_path
+run_name: "darkroom_eval"
+name_postfix: "test"
+save_metrics: true
+save_gifs: false
+metrics_file_name: "inner_episode_trends_darkroom.npz"
+exclude_cost_to_go_from_encoder: false  # Keep ctg available to the shield, but exclude it from the learned latent when true
+
+eval_ctg_ablation:
+  mode: "true"          # true|zero|constant|init_only|scale|invert|noise|shift|episode_shuffle
+  constant_value: 0.5
+  scale_factor: 1.0
+  shift_steps: 1
+  invert_max: ${constrained_env_config.max_cost_to_go}
+  noise_std: 0.0
+  clip_min: 0.0
+  clip_max: ${constrained_env_config.max_cost_to_go}
+  seed: ${seed}
+
+# -------------------- ABLATION EVALUATION --------------------
+ablation_mode: "all"                     # theory_diagnostics|margin_utility|all
+fixed_margin_value: 0.25
+debug_rollouts: 0
+sample_actions: false
+num_ablation_goals: 50
+id_timesteps_per_epoch: ${val_timesteps_per_epoch}
+ood_timesteps_per_epoch: ${val_timesteps_per_epoch}
+
+shield_config:
+  shield_alpha: 1.25
+  shield_safety_margin: 0.0
+  shield_fallback: "policy"
+  shield_warmup_epochs: 0
+  shield_critic_agg: "mean"
+  # shield_filter_mode: "soft"
+  shield_filter_mode: "soft"
+  shield_soft_beta: 1.0
+  shield_critic_quantile: 0.75
+  shield_continuous_num_samples: 8
+  shield_continuous_enable_fast_path: true
+  shield_continuous_mean_exit_margin: 0.0
+  shield_continuous_stage1_num_samples: 3
+  shield_continuous_sampling_scheme: "structured"
+  shield_continuous_wide_scale: 2.5
+  use_world_model_aux: true
+  wm_hidden_dim: 256
+  wm_nll_weight: 1.0
+  wm_loss_weight: 1.0
+  cbf_smoothness_weight: 0.0
+  latent_distill_weight: 0.1
+  rnd_loss_weight: 0.00
+  epsilon_calib_weight: 0.05
+  epsilon_calib_quantile: 0.95
+  gamma_conjugacy_weight: 0.1
+  cbf_collapse_weight: 0.1
+  detach_structural_losses: true
+
+# -------------------- EVALUATION SETTINGS --------------------
+num_test_goals: 100                          # Number of test environments
+val_timesteps_per_epoch: 150000               # Evaluation episode length
+seed: 42                                     # Reproducibility
+
+# -------------------- ENVIRONMENT CONFIGURATION --------------------
+# Must match the training environment exactly
+env_name: "DarkRoomHard-v0"
+grid_size: 17
+time_limit: 30
+max_inner_episodes: 50
+env_mode: "sync" 
+# to support async:
+# - Gif creation needs access to epoch and the parent needs a handle to be able to wait for the process to finish
+# - metrics object of the envs needs to be aggregated
+
+constrained_env_config:
+  cost_seed: dynamic
+  cost_num: 100
+  cost_cost: 0.1
+  min_cost_to_go: 0.1
+  max_cost_to_go: 1.5
+  empty_radius: 1
+  guranatee_path: true
+  reset_to_new_cost: true
+  fix_map_across_budgets: false
+  train_radial_alpha: -0.5
+
+# -------------------- MODEL ARCHITECTURE --------------------
+# CRITICAL: Must exactly match training configuration
+max_seq_len: 1500
+embedding_dim: 64
+hidden_dim: 64
+num_layers: 4
+num_heads: 8
+
+constrained_agent_config:
+  fixed_lagrangian_multiplier: 3.0
+  lambda_lr: 3e-5
+  lambda_init: 0.0
+  lambda_upper_bound: null
+  max_unused_fraction: 1
+
+
+# ============================================================================
+# PLACEHOLDER VALUES - Required by Experiment constructor but NOT used in eval
+# ============================================================================
+
+# -------------------- LOGGING (DISABLED) --------------------
+use_wandb: false
+wandb_project: "q-barrier"  # Not used when use_wandb: false
+
+# -------------------- MINIMAL TRAINING PLACEHOLDERS --------------------
+# These are required by Experiment() constructor but ignored during evaluation
+num_train_goals: 1           # Minimal value (only for env creation)
+parallel_actors_per_goal: 1  # Minimal value
+replay_capacity: 1000        # Not used in eval
+epochs: 1                    # Not used in eval
+batch_size: 32               # Not used in eval  
+learning_rate: 3e-4          # Not used in eval
+train_timesteps_per_epoch: 100    # Not used in eval
+train_batches_per_epoch: 1        # Not used in eval
+start_learning_at_epoch: 0        # Not used in eval
+mixed_precision: "no"             # Not used in eval
+val_interval: 1                   # Not used in eval
+ckpt_interval: 1                  # Not used in eval
+
+# -------------------- HYDRA CONFIGURATION --------------------
+hydra:
+  run:
+    dir: ${ckpt_base_dir}/${run_name} 

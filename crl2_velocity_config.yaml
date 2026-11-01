@@ -1,0 +1,101 @@
+use_shield: false
+run_name: "velocity_${now:%m%d-%H%M}"
+ckpt_base_dir: "./checkpoints"
+use_wandb: false
+wandb_project: "q-barrier"
+
+# Task type
+task_type: "velocity"
+
+# Environment - choose one of the 5 velocity environments
+# env_name: "SafetyHopperVelocity-v1"
+# env_name: "SafetyAntVelocity-v1"
+# env_name: "SafetyHumanoidVelocity-v1"
+# env_name: "SafetyWalker2dVelocity-v1"
+env_name: "SafetyHalfCheetahVelocity-v1"
+
+# Rollout action selection
+sample_actions: true  # sample from the policy during train/eval interaction; false uses argmax/mean
+
+env_mode: "async"
+num_train_goals: 20
+num_test_goals: 10
+time_limit: 200
+max_inner_episodes: 10
+sticky_movement_multiplier: 1
+lidar: false
+replay_capacity: 100000
+seed: 42
+reward_multiplier: 1
+cost_multiplier: 1
+normalize_reward: true
+shield_config:
+  # Runtime filtering
+  shield_alpha: 1.25
+  shield_safety_margin: 0.0
+  shield_fallback: "policy"
+  shield_warmup_epochs: 0
+  shield_critic_agg: "mean"
+  shield_filter_mode: "soft"
+  shield_soft_beta: 1.0
+  shield_critic_quantile: 0.75
+  shield_continuous_num_samples: 1
+  shield_continuous_enable_fast_path: true
+  shield_continuous_mean_exit_margin: 0.0
+  shield_continuous_stage1_num_samples: 3
+  shield_continuous_sampling_scheme: "structured"
+  shield_continuous_wide_scale: 2.5
+
+  # Auxiliary training
+  use_world_model_aux: true
+  wm_hidden_dim: 256
+  wm_nll_weight: 1.0
+  wm_loss_weight: 1.0
+  cbf_smoothness_weight: 0.0
+  latent_distill_weight: 0.1
+  rnd_loss_weight: 0.00
+  epsilon_calib_weight: 0.05
+  epsilon_calib_quantile: 0.95
+  gamma_conjugacy_weight: 0.1
+  cbf_collapse_weight: 0.1
+  detach_structural_losses: true
+
+
+constrained_env_config:
+  # radial_alpha not used for velocity tasks
+  train_radial_alpha: 0.0
+
+  # Cost-to-go range - tune based on empirical testing
+  # Start with lower values since velocity violations are binary (0 or 1)
+  min_ctg: 0.0
+  max_ctg: 10.0
+
+constrained_agent_config:
+  fixed_lagrangian_multiplier: 5  # Lower for velocity tasks
+  lambda_lr: 3e-5
+  lambda_init: 0.0
+  lambda_upper_bound: null
+  max_unused_fraction: 10.0
+
+max_seq_len: ${eval:'${time_limit} * ${max_inner_episodes}'}
+embedding_dim: 64
+hidden_dim: 64
+num_layers: 4
+num_heads: 8
+
+epochs: 5000
+batch_size: 32
+learning_rate: 3e-4
+train_timesteps_per_epoch: ${max_seq_len}
+train_batches_per_epoch: 1000
+val_timesteps_per_epoch: ${max_seq_len}
+mixed_precision: "no"
+start_learning_at_epoch: 0
+
+val_interval: 3
+ckpt_interval: 1
+load_checkpoint_path: null
+
+hydra:
+  run:
+    dir: ${ckpt_base_dir}/${run_name}

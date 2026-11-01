@@ -1,0 +1,76 @@
+# Portable evaluation settings from archived shield_darkroom_later; not training metadata.
+use_shield: true
+ckpt_base_dir: ./outputs/evaluation
+load_checkpoint_path: ./pretrained/darkroom.pt
+load_checkpoint_epoch: null
+run_name: pretrained_darkroom
+name_postfix: test
+save_metrics: true
+save_gifs: false
+metrics_file_name: inner_episode_trends.npz
+shield_config:
+  shield_alpha: 1.25
+  shield_safety_margin: 0.0
+  shield_fallback: policy
+  shield_warmup_epochs: 0
+  shield_critic_agg: mean
+  shield_filter_mode: soft
+  shield_soft_beta: 1.0
+  shield_critic_quantile: 0.75
+  use_world_model_aux: true
+  wm_hidden_dim: 256
+  wm_nll_weight: 1.0
+  wm_loss_weight: 1.0
+  cbf_smoothness_weight: 0.0
+  latent_distill_weight: 0.1
+  rnd_loss_weight: 0.0
+  epsilon_calib_weight: 0.05
+  epsilon_calib_quantile: 0.95
+  gamma_conjugacy_weight: 0.1
+  cbf_collapse_weight: 0.1
+  detach_structural_losses: true
+num_test_goals: 100
+val_timesteps_per_epoch: 150000
+seed: 42
+env_name: DarkRoomHard-v0
+grid_size: 17
+time_limit: 30
+max_inner_episodes: 50
+env_mode: sync
+constrained_env_config:
+  cost_seed: dynamic
+  cost_num: 100
+  cost_cost: 0.1
+  min_cost_to_go: 0.1
+  max_cost_to_go: 1.5
+  empty_radius: 1
+  guranatee_path: true
+  reset_to_new_cost: true
+  fix_map_across_budgets: false
+  train_radial_alpha: -0.5
+max_seq_len: 1500
+embedding_dim: 64
+hidden_dim: 64
+num_layers: 4
+num_heads: 8
+constrained_agent_config:
+  fixed_lagrangian_multiplier: 3.0
+  lambda_lr: 3.0e-05
+  lambda_init: 0.0
+  lambda_upper_bound: null
+  max_unused_fraction: 1
+use_wandb: false
+wandb_project: q-barrier
+num_train_goals: 1
+parallel_actors_per_goal: 1
+replay_capacity: 1000
+epochs: 1
+batch_size: 32
+learning_rate: 0.0003
+train_timesteps_per_epoch: 100
+train_batches_per_epoch: 1
+start_learning_at_epoch: 0
+mixed_precision: 'no'
+val_interval: 1
+ckpt_interval: 1
+no_video: true

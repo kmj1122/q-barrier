@@ -1,0 +1,1210 @@
+"""
+Actor-Critic agents and RL objectives.
+"""
+
+import itertools
+from typing import Type, Optional, Tuple, Any, List
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+from einops import repeat, rearrange
+import numpy as np
+import wandb
+import gin
+import gymnasium as gym
+
+from amago.loading import Batch, MAGIC_PAD_VAL
+from amago.nets.tstep_encoders import TstepEncoder
+from amago.nets.traj_encoders import TrajEncoder
+from amago.nets import actor_critic
+from amago.nets.policy_dists import DiscreteLikeContinuous
+from amago import utils
+
+from .lagrange import Lagrange
+
+
+@gin.configurable
+class Multigammas:
+    """A hook for gin configuration of Multi-gamma values.
+
+    Defines the list of gamma values used during training in addition to the main gamma
+    parameter in :class:`Agent`, which is the value used during rollouts/evals by default.
+    Settings are divided into discrete and continuous action spaces versions, because
+    the cost of adding gammas tends to be much higher for continuous action critics,
+    where they multiply the effective batch size of the actor/critic loss computation.
+    Note that adding gammas has no effect on the batch size of the heavier sequence model
+    backbone. Therefore the relative cost of this trick decreases as the overall model
+    size increases.
+
+    Keyword Args:
+        discrete: List of gamma values for discrete action spaces
+        continuous: List of gamma values for continuous action spaces
+    """
+
+    def __init__(
+        self,
+        # fmt: off
+        discrete: List[float] = [.1, .9, .95, .97, .99, .995],
+        continuous: List[float] = [.1, .9, .95, .97, .99, .995],
+        # fmt: on
+    ):
+        self.discrete = discrete
+        self.continuous = continuous
+
+
+@gin.configurable
+def binary_filter(adv: torch.Tensor, threshold: float = 0.0) -> torch.Tensor:
+    """Weights policy regression data according to `(adv > threshold).float()`
+
+    Args:
+        adv: Tensor of advantages (Batch, Length, Gammas, 1)
+
+    Keyword Args:
+        threshold: Float, the threshold for the binary filter. Defaults to 0.0.
+    """
+    return adv > threshold
+
+
+@gin.configurable
+def exp_filter(
+    adv: torch.Tensor,
+    beta: float = 1.0,
+    clip_adv_low: Optional[float] = None,
+    clip_adv_high: Optional[float] = None,
+    clip_weights_low: Optional[float] = 1e-7,
+    clip_weights_high: Optional[float] = None,
+) -> torch.Tensor:
+    """Weights policy regression data according to `exp(beta * adv)`.
+
+    Args:
+        adv: Tensor of advantages (Batch, Length, Gammas, 1)
+
+    Keyword Args:
+        beta: Float, the beta parameter for the exponential filter. Note that some papers define the beta hparam according to
+            exp( 1/beta * adv ), so check whether you need to invert the value
+            to match their setting. Defaults to 1.0.
+        clip_adv_low: If provided, clip input advantages below this value. Defaults to None.
+        clip_adv_high: If provided, clip input advantages above this value. Defaults to None.
+        clip_weights_low: If provided, clip output weights below this value. Defaults to 1e-7.
+        clip_weights_high: If provided, clip output weights above this value. Defaults to None.
+    """
+    if clip_adv_low is not None or clip_adv_high is not None:
+        adv = torch.clamp(adv, min=clip_adv_low, max=clip_adv_high)
+    weights = torch.exp(beta * adv)
+    if clip_weights_low is not None or clip_weights_high is not None:
+        weights = torch.clamp(weights, min=clip_weights_low, max=clip_weights_high)
+    return weights
+
+
+@gin.configurable
+class Agent(nn.Module):
+    """Actor-Critic with a shared sequence model backbone.
+
+    `Agent` manages the training and inference of a sequence model policy. The base learning
+    update is a heavily parallelized/ensembled version of DDPG/TD3/REDQ/etc. + CRR/AWAC.
+
+    Given a sequence of trajectory data `traj_seq`, we embed and encode the sequence as follows:
+
+    .. code-block:: python
+
+        emb_seq = timestep_encoder(traj_seq) # [B, L, dim]
+        state_emb_seq = traj_encoder(emb_seq)  # [B, L, dim]
+        action_dist = actor(state_emb_seq)
+
+    If using a discrete action space, the critic outputs a vector of Q-values (one per action),
+    and continuous actions follow the (state + action) --> scalar setup.
+
+    .. code-block:: python
+
+        if discrete:
+            value_pred = critic(state_emb_seq)[action_dist.sample()]
+        else:
+            value_pred = critic(state_emb_seq, action_dist.sample())
+
+    Value estimates are derived from Q-vals according to:
+
+    .. code-block:: python
+
+        def Q(state, critic, action) -> float:
+            if discrete:
+                return critic(state)[action]
+            else:
+                return critic(state, action)
+
+        def V(state, critic, action_dist, k) -> float:
+            if discrete:
+                return (critic(state) * action_dist.probs).sum()
+            else:
+                return 1 / k * sum(Q(state, critic, action_dist.sample()) for _ in range(k))
+
+        k_c = num_actions_for_value_in_critic_loss
+        td_target = mean_or_min_over_ensemble(
+            r + gamma * (1 - d) * V(next_state_emb, target_critic, target_actor(next_state_emb), k_c)
+        )
+
+    The advantage estimate and corresponding losses are:
+
+    .. code-block:: python
+
+        k_a = num_actions_for_value_in_actor_loss
+        advantages = Q(state_emb, critic, action) - V(state_emb, critic, action_dist, k_a)
+
+        offline_loss = -fbc_filter_func(advantages) * actor(state_emb).log_prob(action)
+        online_loss = -V(state_emb, critic.detach(), actor(state_emb), k_a)
+
+        actor_loss = online_coeff * offline_loss + online_coeff * online_loss
+        critic_loss = (Q(state_emb, critic, action) - td_target) ** 2
+
+    And this is done in parallel across every timestep and multiple values of the discount factor gamma.
+
+    Args:
+        obs_space: Environment observation space (for creating input layers).
+        rl2_space: A gymnasium space that is automatically generated by :py:class:`~amago.envs.amago_env.AMAGOEnv`
+            to represent the shape of extra input features for the previous action and reward.
+        action_space: Environment action space (for creating output layers).
+        max_seq_len: Maximum context length of the policy (in timesteps).
+        tstep_encoder_type: Type of :py:class:`~amago.nets.tstep_encoders.TstepEncoder` to use. Initialized based
+            on provided gym spaces.
+        traj_encoder_type: Type of :py:class:`~amago.nets.traj_encoders.TrajEncoder` to use. Initialized based on
+            provided gym spaces.
+
+    Keyword Args:
+        num_critics: Number of critics in the ensemble. Defaults to 4.
+        num_critics_td: Number of critics from the (larger) ensemble used to create
+            clipped double q targets (REDQ). Defaults to 2.
+        online_coeff: Weight of the "online" aka DPG/TD3-like actor loss
+            -Q(s, a ~ pi(s)). Defaults to 1.0.
+        offline_coeff: Weight of the "offline" aka advantage weighted/"filtered"
+            regression term (CRR/AWAC). Defaults to 0.1.
+        gamma: Discount factor *of the policy we sample during rollouts/evals*.
+            Defaults to 0.999.
+        reward_multiplier: Scale every reward by a constant (for loss function only).
+            Only relevant for numerical stability in value normalization. Avoid large (> 1e5)
+            and small (< 1) absolute values of returns when reward functions are known.
+            Defaults to 10.0.
+        cost_multiplier: Scale every cost by a constant (for loss function only). If None,
+            defaults to reward_multiplier for backward compatibility. This multiplier does
+            not affect rewards.
+        tau: Polyak averaging factor for target network updates (DDPG-like). Defaults to 0.003.
+        fake_filter: If True, skips computation of the advantage weights/"filter". Speeds up
+            pure behavior cloning. Defaults to False.
+        num_actions_for_value_in_critic_loss: Number of actions used to estimate E_[Q(s, a ~ pi)]
+            for continuous action spaces in critic loss (TD targets). Defaults to 1.
+        num_actions_for_value_in_actor_loss: Number of actions used to estimate E_[Q(s, a ~ pi)]
+            for continuous action spaces in the actor loss. Defaults to 1.
+        fbc_filter_func: Function that takes seq of advantage estimates and outputs the regression
+            weights. See :py:func:`~amago.agent.binary_filter` or :py:func:`~amago.agent.exp_filter`. Defaults to :py:func:`~amago.agent.binary_filter`.
+        popart: If True, use :py:class:`~amago.nets.actor_critic.PopArtLayer` normalization for value network outputs. Defaults to True.
+        use_target_actor: If True, use a target actor to sample actions used in TD targets.
+            Defaults to True.
+        use_multigamma: If True, train on multiple discount horizons (:py:class:`~amago.agent.Multigammas`) in parallel. Defaults to True.
+        actor_type: Actor MLP head for producing action distributions. Defaults to :py:class:`~amago.nets.actor_critic.Actor`.
+        critic_type: Critic MLP head for producing Q-values. Defaults to :py:class:`~amago.nets.actor_critic.NCritics`.
+    """
+
+    def __init__(
+        self,
+        obs_space: gym.spaces.Dict,
+        rl2_space: gym.spaces.Box,
+        action_space: gym.spaces.Space,
+        max_seq_len: int,
+        tstep_encoder_type: Type[TstepEncoder],
+        traj_encoder_type: Type[TrajEncoder],
+        num_critics: int = 4,
+        num_critics_td: int = 2,
+        online_coeff: float = 1.0,
+        offline_coeff: float = 0.1,
+        gamma: float = 0.999,
+        reward_multiplier: float = 10.0,
+        cost_multiplier: Optional[float] = None,
+        tau: float = 0.003,
+        fake_filter: bool = False,
+        num_actions_for_value_in_critic_loss: int = 1,
+        num_actions_for_value_in_actor_loss: int = 1,
+        fbc_filter_func: callable = binary_filter,
+        popart: bool = True,
+        use_target_actor: bool = True,
+        use_multigamma: bool = True,
+        actor_type: Type[actor_critic.BaseActorHead] = actor_critic.Actor,
+        critic_type: Type[actor_critic.BaseCriticHead] = actor_critic.NCritics,
+        constrained_config = None,
+    ):
+        super().__init__()
+        self.obs_space = obs_space
+        self.rl2_space = rl2_space
+
+        self.action_space = action_space
+        self.multibinary = False
+        self.discrete = False
+        if isinstance(self.action_space, gym.spaces.Discrete):
+            self.action_dim = self.action_space.n
+            self.discrete = True
+        elif isinstance(self.action_space, gym.spaces.MultiBinary):
+            self.action_dim = self.action_space.n
+            self.multibinary = True
+        elif isinstance(self.action_space, gym.spaces.Box):
+            self.action_dim = self.action_space.shape[-1]
+        else:
+            raise ValueError(f"Unsupported action space: `{type(self.action_space)}`")
+
+        self.reward_multiplier = reward_multiplier
+        self.cost_multiplier = reward_multiplier if cost_multiplier is None else cost_multiplier
+        self.pad_val = MAGIC_PAD_VAL
+        self.fake_filter = fake_filter
+        self.num_actions_for_value_in_critic_loss = num_actions_for_value_in_critic_loss
+        self.num_actions_for_value_in_actor_loss = num_actions_for_value_in_actor_loss
+        self.fbc_filter_func = fbc_filter_func
+        self.offline_coeff = offline_coeff
+        self.online_coeff = online_coeff
+        self.tau = tau
+        self.use_target_actor = use_target_actor
+        self.max_seq_len = max_seq_len
+        self.constrained_config = constrained_config
+        if self.constrained_config is not None \
+            and self.constrained_config.fixed_lagrangian_multiplier is None:
+            self.lagrange = Lagrange(
+                lagrangian_multiplier_init=self.constrained_config.lambda_init,
+                lambda_lr=self.constrained_config.lambda_lr,
+                lambda_optimizer='Adam',
+                lagrangian_upper_bound=self.constrained_config.lambda_upper_bound,
+            )
+
+        self.tstep_encoder = tstep_encoder_type(
+            obs_space=obs_space,
+            rl2_space=rl2_space,
+        )
+        self.traj_encoder = traj_encoder_type(
+            tstep_dim=self.tstep_encoder.emb_dim,
+            max_seq_len=max_seq_len,
+        )
+        self.emb_dim = self.traj_encoder.emb_dim
+
+        if self.discrete:
+            multigammas = Multigammas().discrete
+        else:
+            multigammas = Multigammas().continuous
+
+        # provided hparam `gamma` will stay in the -1 index
+        # of gammas, actor, and critic outputs.
+        gammas = (multigammas if use_multigamma else []) + [gamma]
+        self.gammas = torch.Tensor(gammas).float()
+        assert num_critics_td <= num_critics
+        self.num_critics = num_critics
+        self.num_critics_td = num_critics_td
+
+        self.popart = actor_critic.PopArtLayer(gammas=len(gammas), enabled=popart)
+
+        ac_kwargs = {
+            "state_dim": self.traj_encoder.emb_dim,
+            "action_dim": self.action_dim,
+            "discrete": self.discrete,
+            "gammas": self.gammas,
+        }
+        self.critics = critic_type(**ac_kwargs, num_critics=num_critics)
+        self.target_critics = critic_type(**ac_kwargs, num_critics=num_critics)
+        self.maximized_critics = critic_type(**ac_kwargs, num_critics=num_critics)
+        
+        if self.constrained_config is not None:
+            # Cost critics for constraint learning
+            self.cost_critics = critic_type(**ac_kwargs, num_critics=num_critics)
+            self.target_cost_critics = critic_type(**ac_kwargs, num_critics=num_critics)
+            self.maximized_cost_critics = critic_type(**ac_kwargs, num_critics=num_critics)
+            # Separate PopArt layer for cost critics
+            self.cost_popart = actor_critic.PopArtLayer(gammas=len(gammas), enabled=popart)
+        
+        if self.multibinary:
+            ac_kwargs["cont_dist_kind"] = "multibinary"
+        self.actor = actor_type(**ac_kwargs)
+        self.target_actor = actor_type(**ac_kwargs)
+        # full weight copy to targets
+        self.hard_sync_targets()
+
+    @property
+    def trainable_params(self):
+        """Iterable over all trainable parameters, which should be passed to the optimizer."""
+        return itertools.chain(
+            self.tstep_encoder.parameters(),
+            self.traj_encoder.parameters(),
+            self.critics.parameters(),
+            self.cost_critics.parameters() if self.constrained_config is not None else [],
+            self.actor.parameters(),
+        )
+
+    def _full_copy(self, target, online):
+        for target_param, param in zip(target.parameters(), online.parameters()):
+            target_param.data.copy_(param.data)
+
+    def _ema_copy(self, target, online):
+        for target_param, param in zip(target.parameters(), online.parameters()):
+            target_param.data.copy_(
+                target_param.data * (1.0 - self.tau) + param.data * self.tau
+            )
+
+    def hard_sync_targets(self):
+        """Hard copy online actor/critics to target actor/critics"""
+        self._full_copy(self.target_critics, self.critics)
+        self._full_copy(self.target_actor, self.actor)
+        self._full_copy(self.maximized_critics, self.critics)
+        if self.constrained_config is not None:
+            self._full_copy(self.target_cost_critics, self.cost_critics)
+            self._full_copy(self.maximized_cost_critics, self.cost_critics)
+
+    def soft_sync_targets(self):
+        """EMA copy online actor/critics to target actor/critics (DDPG-style)"""
+        self._ema_copy(self.target_critics, self.critics)
+        self._ema_copy(self.target_actor, self.actor)
+        # full copy duplicate critic
+        self._full_copy(self.maximized_critics, self.critics)
+        if self.constrained_config is not None:
+            self._ema_copy(self.target_cost_critics, self.cost_critics)
+            self._full_copy(self.maximized_cost_critics, self.cost_critics)
+
+    def get_actions(
+        self,
+        obs: dict[str, torch.Tensor],
+        rl2s: torch.Tensor,
+        time_idxs: torch.Tensor,
+        hidden_state=None,
+        sample: bool = True,
+    ) -> Tuple[torch.Tensor, Any]:
+        """Get rollout actions from the current policy.
+
+        Note the standard torch `forward` implements the training step, while `get_actions`
+        is the inference step. Most of the arguments here are easily gathered from the
+        AMAGOEnv gymnasium wrapper. See `amago.experiment.Experiment.interact` for an example.
+
+        Args:
+            obs: Dictionary of (batched) observation tensors. AMAGOEnv makes all
+                observations into dicts.
+            rl2s: Batched Tensor of previous action and reward. AMAGOEnv makes these.
+            time_idxs: Batched Tensor indicating the global timestep of the episode.
+                Mainly used for position embeddings when the sequence length is much shorter
+                than the episode length.
+            hidden_state: Hidden state of the TrajEncoder. Defaults to None.
+            sample: Whether to sample from the action distribution or take the argmax
+                (discrete) or mean (continuous). Defaults to True.
+
+        Returns:
+            tuple:
+                - Batched Tensor of actions to take in each parallel env *for the primary
+                  ("test-time") discount factor* `Agent.gamma`.
+                - Updated hidden state of the TrajEncoder.
+        """
+        tstep_emb = self.tstep_encoder(obs=obs, rl2s=rl2s)
+        # sequence model embedding [batch, length, d_emb]
+        traj_emb_t, hidden_state = self.traj_encoder(
+            tstep_emb, time_idxs=time_idxs, hidden_state=hidden_state
+        )
+        # generate action distribution [batch, length, len(self.gammas), d_action]
+        action_dists = self.actor(traj_emb_t)
+        if sample:
+            actions = action_dists.sample()
+        else:
+            if self.discrete:
+                actions = torch.argmax(action_dists.probs, dim=-1, keepdim=True)
+            else:
+                actions = action_dists.mean
+        # get intended gamma distribution (always in -1 idx)
+        actions = actions[..., -1, :]
+        dtype = torch.uint8 if (self.discrete or self.multibinary) else torch.float32
+        return actions.to(dtype=dtype), hidden_state
+
+    def _sample_k_actions(self, dist, k: int):
+        if self.discrete:
+            assert k == 1, "There is no need to sample multiple discrete actions"
+            a = dist.probs.unsqueeze(0)
+        elif self.actor.actions_differentiable:
+            a = torch.stack([dist.rsample() for _ in range(k)], dim=0)
+        else:
+            a = dist.sample((k,))
+        return a
+
+    def _td_target_underestimate(self, ensemble_td_target: torch.Tensor):
+        B, L, C, G, _ = ensemble_td_target.shape
+        # random subset of critic ensemble
+        random_subset = torch.randint(
+            low=0,
+            high=C,
+            size=(B, L, self.num_critics_td, G, 1),
+            device=ensemble_td_target.device,
+        )
+        td_target_rand = torch.take_along_dim(ensemble_td_target, random_subset, dim=2)
+        if self.online_coeff > 0:
+            # clipped double q
+            td_target = td_target_rand.min(2, keepdims=True).values
+        else:
+            # without DPG updates the usual min creates strong underestimation. take mean instead
+            td_target = td_target_rand.mean(2, keepdims=True)
+        return td_target
+
+    def _td_target_overestimate(self, ensemble_td_target: torch.Tensor):
+        B, L, C, G, _ = ensemble_td_target.shape
+        # random subset of critic ensemble
+        random_subset = torch.randint(
+            low=0,
+            high=C,
+            size=(B, L, self.num_critics_td, G, 1),
+            device=ensemble_td_target.device,
+        )
+        td_target_rand = torch.take_along_dim(ensemble_td_target, random_subset, dim=2)
+        if self.online_coeff > 0:
+            # for costs, be pessimistic and avoid underestimation: use max over critics
+            td_target = td_target_rand.max(2, keepdims=True).values
+        else:
+            # in purely offline-style updates, avoid excessive conservatism
+            td_target = td_target_rand.mean(2, keepdims=True)
+        return td_target
+
+    # import line_profiler
+    # @line_profiler.profile
+    def forward(
+        self, batch: Batch, log_step: bool
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Computes actor and critic losses from a Batch of trajectory data.
+
+        Args:
+            batch: Batch object containing trajectory data including observations,
+                actions, rewards, dones, etc.
+            log_step: If True, computes and stores additional statistics in
+                self.update_info for wandb logging.
+
+        Returns:
+            A tuple containing:
+                - critic_loss: Tensor of shape (B, L-1, num_critics, G, 1) where B is batch size,
+                    L is sequence length, G is number of discount factors
+                - actor_loss: Tensor of shape (B, L-1, G, 1)
+        """
+        # fmt: off
+        self.update_info = {}  # holds wandb stats
+
+        ##################
+        ## Timestep Emb ##
+        ##################
+        active_log_dict = self.update_info if log_step else None
+        o = self.tstep_encoder(obs=batch.obs, rl2s=batch.rl2s, log_dict=active_log_dict)
+
+        ###################
+        ## Get Organized ##
+        ###################
+        B, L, D_o = o.shape
+        # padded actions are `self.pad_val` which will be invalid;
+        # clip to valid range now and mask the loss later
+        a = batch.actions
+        a = a.clamp(0, 1.0) if self.discrete else a.clamp(-1., 1.)
+        _B, _L, D_action = a.shape
+        assert _L == L - 1
+        G = len(self.gammas)
+        K_c = self.num_actions_for_value_in_critic_loss if not self.discrete else 1
+        K_a = self.num_actions_for_value_in_actor_loss if not self.discrete else 1
+        # note that the last timestep does not have an action.
+        # we give it a fake one to make shape math work.
+        a_buffer = F.pad(a, (0, 0, 0, 1), "replicate")
+        a_buffer = repeat(a_buffer, f"b l a -> b l {G} a")
+        C = len(self.critics)
+        # arrays used by critic update end up in a (B, L, C, G, dim) format
+        assert batch.rews.shape == (B, L - 1, 1)
+        assert batch.dones.shape == (B, L - 1, 1)
+        r = repeat((self.reward_multiplier * batch.rews).float(), f"b l r -> b l 1 {G} r")
+        gamma = self.gammas.to(r.device).unsqueeze(-1)
+        d = repeat(batch.dones.float(), f"b l d -> b l 1 {G} d")
+        
+
+        D_emb = self.traj_encoder.emb_dim
+        # 1.0 where loss at this index should count, 0.0 where is should be ignored
+        state_mask = (~((batch.rl2s == self.pad_val).all(-1, keepdim=True))).float()[:, 1:, ...]
+        actor_mask = F.pad(state_mask, (0, 0, 0, 1), "constant", 0.0)
+        actor_mask = repeat(actor_mask, f"b l 1 -> b l {G} 1")
+        critic_mask = repeat(state_mask, f"b l 1 -> b l {C} {G} 1")
+        
+        
+        # Process cost data
+        c = None
+        if self.constrained_config is not None:
+            cost_limit = batch.infos['cost_limit'][:, [0]]
+            costs = batch.infos['cost']
+            # self.update_info['costs'] = costs[state_mask.squeeze()==1].mean()
+            soft_reset = batch.infos['soft_reset'] == 1
+            assert soft_reset.shape == (B, L - 1)
+            inner_ep_costs = torch.cumsum(costs, dim=1)
+            inner_ep_costs = inner_ep_costs[soft_reset].view(B, -1)
+            inner_ep_costs = torch.diff(inner_ep_costs, dim=1, prepend=torch.zeros_like(inner_ep_costs[:, :1]))
+            inner_ep_cost_temporal_diff = inner_ep_costs - cost_limit
+            if self.constrained_config.fixed_lagrangian_multiplier is None: # does it make sense that we're not using Q here?
+                inner_ep_cost_violation_mask = inner_ep_cost_temporal_diff > 0
+                pos_temporal_diff_metric = inner_ep_cost_temporal_diff[inner_ep_cost_violation_mask].mean()
+                self.lagrange.update_lagrange_multiplier(pos_temporal_diff_metric)
+                self.update_info['cost temporal diff metric'] = pos_temporal_diff_metric
+                self.update_info['lambda'] = self.lagrange.lagrangian_multiplier.item()
+            self.update_info['inner_ep_costs'] = inner_ep_costs.mean()
+            c = repeat((self.cost_multiplier * costs).float(), f"b l -> b l 1 {G} 1")
+
+        ########################
+        ## Sequence Embedding ##
+        ########################
+        # one trajectory encoder forward pass
+        s_rep, hidden_state = self.traj_encoder(seq=o, time_idxs=batch.time_idxs, hidden_state=None, log_dict=active_log_dict)
+        assert s_rep.shape == (B, L, D_emb)
+        s_rep_prev = s_rep[:, :-1, ...].contiguous()
+        s_rep_next = s_rep[:, 1:, ...].contiguous()
+
+        ################
+        ## a ~ \pi(s) ##
+        ################
+        critic_loss = None
+        a_dist = self.actor(s_rep, log_dict=active_log_dict)
+        a_agent = self._sample_k_actions(a_dist, k=K_a)
+        assert a_agent.shape == (K_a, B, L, G, D_action)
+        if log_step:
+            self.update_info.update(self._policy_stats(actor_mask, a_dist))
+
+        if not self.fake_filter or self.online_coeff > 0:  # if we use the critic to train the actor
+            ############################
+            ## Q(s, a ~ \pi), Q(s, a) ##
+            ############################
+            s_a_agent_g = (s_rep.detach(), a_agent)
+            q_s_a_agent_g = self.maximized_critics(*s_a_agent_g).mean(0)
+            s_a_g = (s_rep_prev, a_buffer[:, :-1, ...].contiguous().unsqueeze(0))
+            q_s_a_g = self.critics(*s_a_g, log_dict=active_log_dict).mean(0)
+            assert q_s_a_agent_g.shape == (B, L, C, G, 1)
+            assert q_s_a_g.shape == (B, L-1, C, G, 1)
+            if self.constrained_config is not None:
+                cost_q_s_a_agent_g = self.maximized_cost_critics(*s_a_agent_g).mean(0)
+                assert cost_q_s_a_agent_g.shape == (B, L, C, G, 1)
+                # Optionally build an episode-level ignore mask for online actor losses.
+                use_ignore_mask = getattr(self.constrained_config, "apply_cost_violation_mask", False)
+                if use_ignore_mask:
+                    with torch.no_grad():
+                        # Min over critics (most underestimating), then take test-time gamma (-1)
+                        # min_cost_q = cost_q_s_a_agent_g.min(2).values  # (B, L, G, 1)
+                        min_cost_q = self.cost_popart(cost_q_s_a_agent_g, normalized=False).min(2).values  # (B, L, G, 1)
+                        min_cost_q_tt = min_cost_q[..., -1, :]  # (B, L, 1)
+                        # Identify the start of each inner episode: t==0 or after a soft reset
+                        start_mask = torch.zeros((B, L), dtype=torch.bool, device=min_cost_q_tt.device)
+                        start_mask[:, 0] = True
+                        start_mask[:, 1:] = soft_reset
+                        # Predicted cost-to-go at inner-episode starts (scale limit to match critic scale)
+                        scaled_cost_limit = (self.reward_multiplier * cost_limit).to(min_cost_q_tt.dtype)  # (B, 1)
+                        pred_cost_starts = min_cost_q_tt[start_mask].view(B, -1)  # (B, num_inner_eps)
+                        # Inner episode flagged for ignore if predicted cost-to-go exceeds budget
+                        inner_ep_ignore_mask = (pred_cost_starts > scaled_cost_limit).to(torch.long)  # (B, num_inner_eps)
+                        # Log percent of ignored inner episodes (batch average)
+                        if log_step:
+                            ignored_pct = inner_ep_ignore_mask.float().mean() * 100.0
+                            self.update_info["Ignored Inner Episodes (%)"] = ignored_pct
+
+                        # Map inner-episode flags back to per-timestep mask
+                        temp_gather_matrix = torch.cumsum(
+                            torch.cat(
+                                [torch.zeros_like(soft_reset[:, :1]), torch.roll(soft_reset, shifts=1, dims=1)],
+                                dim=1,
+                            )[:, :-1],
+                            dim=1,
+                        )
+                        # Avoid index out of bounds when mapping the last steps
+                        temp_gather_matrix[temp_gather_matrix == soft_reset[0].sum()] = 0
+                        per_t_ignore = torch.gather(inner_ep_ignore_mask, dim=1, index=temp_gather_matrix)  # (B, L-1)
+                        per_t_ignore = per_t_ignore[..., None, None]  # (B, L-1, 1, 1)
+                        online_ignore_multiplier = (1.0 - per_t_ignore.float())  # (B, L-1, 1, 1)
+                else:
+                    online_ignore_multiplier = torch.ones((B, L - 1, 1, 1), device=a.device)
+
+            ################
+            ## TD Targets ##
+            ################
+            with torch.no_grad():
+                # (a ~ pi_target)
+                a_prime_dist = self.target_actor(s_rep) if self.use_target_actor else a_dist
+                ap = self._sample_k_actions(a_prime_dist, k=K_c).detach() # a' 
+                assert ap.shape == (K_c, B, L, G, D_action)
+                sp_ap_gp = (s_rep_next, ap[:, :, 1:, ...].contiguous()) # (s', a')
+                # Q_target(s', a')
+                q_targ_sp_ap_gp = self.popart(self.target_critics(*sp_ap_gp).mean(0), normalized=False)
+                assert q_targ_sp_ap_gp.shape == (B, L - 1, C, G, 1)
+                # y = r + gamma * (1 - d) * Q_target(s', a')
+                ensemble_td_target = r + gamma * (1.0 - d) * q_targ_sp_ap_gp
+                assert ensemble_td_target.shape == (B, L - 1, C, G, 1)
+                td_target = self._td_target_underestimate(ensemble_td_target)
+                assert td_target.shape == (B, L - 1, 1, G, 1)
+                self.popart.update_stats(
+                    td_target, mask=critic_mask.all(2, keepdim=True)
+                )
+                td_target_norm = self.popart.normalize_values(td_target)
+                assert td_target_norm.shape == (B, L - 1, 1, G, 1)
+
+            #################
+            ## Critic Loss ##
+            #################
+            critic_loss = (self.popart(q_s_a_g) - td_target_norm.detach()).pow(2)
+            assert critic_loss.shape == (B, L - 1, C, G, 1)
+            if log_step:
+                td_stats = self._td_stats(
+                    critic_mask,
+                    q_s_a_g,
+                    self.popart(q_s_a_g, normalized=False),
+                    r=r / self.reward_multiplier,
+                    d=d,
+                    td_target=td_target,
+                )
+                popart_stats = self._popart_stats()
+                self.update_info.update(td_stats | popart_stats)
+
+            if self.constrained_config is not None:
+                ######################
+                ## Cost Critic Loss ##
+                ######################
+                s_a_g_cost = (s_rep_prev, a_buffer[:, :-1, ...].contiguous().unsqueeze(0))
+                cost_q_s_a_g = self.cost_critics(*s_a_g_cost, log_dict=active_log_dict).mean(0)
+                assert cost_q_s_a_g.shape == (B, L - 1, C, G, 1)
+                
+                with torch.no_grad():
+                    # Format soft_reset for cost critic loss (same shape as dones)
+                    soft_reset_shaped = repeat(soft_reset.float(), f"b l -> b l 1 {G} 1")
+                    # Cost TD targets: c + gamma * (1 - soft_reset) * Cost_Q_target(s', a')
+                    sp_ap_gp_cost = (s_rep_next, ap[:, :, 1:, ...].contiguous()) # (s', a')
+                    cost_q_targ_sp_ap_gp = self.cost_popart(self.target_cost_critics(*sp_ap_gp_cost).mean(0), normalized=False)
+                    assert cost_q_targ_sp_ap_gp.shape == (B, L - 1, C, G, 1)
+                    # Cost TD target: c + gamma * (1 - soft_reset) * Cost_Q_target(s', a')
+                    cost_ensemble_td_target = c + gamma * (1.0 - soft_reset_shaped) * cost_q_targ_sp_ap_gp
+                    assert cost_ensemble_td_target.shape == (B, L - 1, C, G, 1)
+                    cost_td_target = self._td_target_overestimate(cost_ensemble_td_target)
+                    assert cost_td_target.shape == (B, L - 1, 1, G, 1)
+                    self.cost_popart.update_stats(
+                        cost_td_target, mask=critic_mask.all(2, keepdim=True)
+                    )
+                    cost_td_target_norm = self.cost_popart.normalize_values(cost_td_target)
+                    assert cost_td_target_norm.shape == (B, L - 1, 1, G, 1)
+                
+                cost_critic_loss = (self.cost_popart(cost_q_s_a_g) - cost_td_target_norm.detach()).pow(2)
+                assert cost_critic_loss.shape == (B, L - 1, C, G, 1)
+                critic_loss = critic_loss + cost_critic_loss
+                
+                if log_step:
+                    cost_td_stats = self._cost_td_stats(
+                        critic_mask,
+                        cost_q_s_a_g,
+                        self.cost_popart(cost_q_s_a_g, normalized=False),
+                        c=c / self.cost_multiplier,
+                        d=d,
+                        cost_td_target=cost_td_target,
+                    )
+                    cost_popart_stats = self._cost_popart_stats()
+                    self.update_info.update(cost_td_stats | cost_popart_stats)
+
+        actor_loss = torch.zeros((B, L - 1, G, 1), device=a.device)
+        if self.online_coeff > 0:
+            #########################
+            ## "Online" (DPG) Loss ##
+            #########################
+            assert (
+                self.actor.actions_differentiable
+            ), "online-style actor loss is not compatible with action distribution"
+            if self.constrained_config is not None:
+                # Apply ignore mask derived from cost critics to DPG term
+                actor_loss += self.online_coeff * -(
+                    self.popart(q_s_a_agent_g[:, :-1, ...].min(2).values)
+                ) * online_ignore_multiplier
+            else:
+                actor_loss += self.online_coeff * -(
+                    self.popart(q_s_a_agent_g[:, :-1, ...].min(2).values)
+                )
+        
+        if self.offline_coeff > 0:
+            #####################################################
+            ## "Offline" (Advantage Weighted/Filtered BC) Loss ##
+            #####################################################
+            if not self.fake_filter:
+                # f(A(s, a))
+                with torch.no_grad():
+                    # V(s) = E_{a ~ \pi}[Q(s, a)] (computed with sample of k actions
+                    # in continuous case, or explicitly in discrete case). 
+                    # Already taken mean over actions, now mean over critic ensemble.
+                    val_s_g = q_s_a_agent_g[:, :-1, ...].mean(2).detach()
+                    assert val_s_g.shape == (B, L - 1, G, 1)
+                    # A(s, a) = Q(s, a) - V(s)
+                    advantage_a_s_g = q_s_a_g.mean(2) - val_s_g
+                    assert advantage_a_s_g.shape == (B, L - 1, G, 1)
+                    filter_ = self.fbc_filter_func(advantage_a_s_g).float()
+            else:
+                # Behavior Cloning (f(A(s, a)) = 1)
+                filter_ = torch.ones((1, 1, 1, 1), device=a.device)
+            
+            # log pi(a | s)
+            if self.discrete:
+                # buffer actions are one-hot encoded
+                logp_a = a_dist.log_prob(a_buffer.argmax(-1)).unsqueeze(-1)
+            elif self.multibinary:
+                logp_a = a_dist.log_prob(a_buffer).mean(-1, keepdim=True)
+            else:
+                logp_a = a_dist.log_prob(a_buffer).sum(-1, keepdim=True)
+            # throw away last action that was a duplicate
+            logp_a = logp_a[:, :-1, ...]
+            actor_loss += self.offline_coeff * -(filter_.detach() * logp_a) # + -f(A(s, a)) * log pi(a | s)
+            if log_step:
+                filter_stats = self._filter_stats(actor_mask, logp_a, filter_)
+                self.update_info.update(filter_stats)
+        
+        if self.constrained_config is not None:
+            # shape of cost_q_s_a_agent_g: (B, L, C, G, 1)
+            # shape of inner_ep_cost_violation_mask: (B, num_inner_episodes)
+            # shape of soft_reset: (B, L)
+            temp_gather_matrix = torch.cumsum(torch.cat([torch.zeros_like(soft_reset[:, :1]), torch.roll(soft_reset, shifts=1, dims=1)], dim=1)[:, :-1], dim=1)
+            temp_gather_matrix[temp_gather_matrix == soft_reset[0].sum()] = 0 # just to avoid index out of bounds
+            inner_ep_cost_violation_mask = torch.zeros_like(inner_ep_cost_temporal_diff)
+            inner_ep_cost_violation_mask[inner_ep_cost_temporal_diff > 0] = 1
+            inner_ep_cost_violation_mask[inner_ep_cost_temporal_diff < - cost_limit * self.constrained_config.max_unused_fraction] = -1
+            if inner_ep_cost_violation_mask.numel() > 0:
+                temp_mask = torch.gather(inner_ep_cost_violation_mask, dim=1, index=temp_gather_matrix)[..., None, None]
+                temp_mask = torch.cat([temp_mask[:, :1], temp_mask], dim=1)
+            else:
+                temp_mask = torch.zeros((B, L, 1, 1), device=a.device)
+            if self.constrained_config.fixed_lagrangian_multiplier is None:
+                lam = self.lagrange.lagrangian_multiplier.item()
+            else:
+                lam = self.constrained_config.fixed_lagrangian_multiplier
+            # Apply the same ignore mask to the Lagrangian cost term
+            actor_loss += lam * (
+                self.cost_popart(cost_q_s_a_agent_g[:, :-1, ...].max(2).values)
+                * temp_mask[:, :-1]
+                * online_ignore_multiplier
+            ) 
+            # actor_loss += self.lagrange.lagrangian_multiplier.item() * (self.cost_popart(cost_q_s_a_agent_g[:, :-1, ...].max(2).values)) 
+
+        # fmt: on
+        return critic_loss, actor_loss
+
+    def _td_stats(self, mask, raw_q_s_a_g, q_s_a_g, r, d, td_target) -> dict:
+        # messy data gathering for wandb console
+        def masked_avg(x_, dim=0):
+            return (mask[..., dim, :] * x_[..., dim, :]).sum().detach() / mask[
+                ..., dim, :
+            ].sum()
+
+        where_mask = torch.where(mask.all(2, keepdims=True) > 0)
+
+        stats = {}
+        for i, gamma in enumerate(self.gammas):
+            stats[f"Q(s, a) (global mean, rescaled) gamma={gamma:.3f}"] = masked_avg(
+                q_s_a_g, i
+            )
+            stats[f"Q(s,a) (global mean, raw scale) gamma={gamma:.3f}"] = masked_avg(
+                raw_q_s_a_g, i
+            )
+            stats[
+                f"Q(s, a) Ensemble Stdev. (raw scale, ignoring padding) gamma={gamma:.3f}"
+            ] = (raw_q_s_a_g[..., i, :].std(2).mean())
+
+        stats.update(
+            {
+                "Q(s, a) (global std, rescaled, ignoring padding)": q_s_a_g.std(),
+                "Min TD Target": td_target[where_mask].min(),
+                "Max TD Target": td_target[where_mask].max(),
+                "TD Target (test-time gamma)": masked_avg(td_target, -1),
+                "Mean Reward (in training sequences)": masked_avg(r),
+                "Sequences Containing Done": (d * mask.all(2, keepdim=True))
+                .any((1, 2, 3))
+                .sum(),
+                "Min Reward (in training sequences)": r[where_mask].min(),
+                "Max Reward (in training sequences)": r[where_mask].max(),
+            }
+        )
+        return stats
+
+    def _policy_stats(self, mask, a_dist) -> dict:
+        # messy data gathering for wandb console
+        # mask shape is batch length gammas 1
+        sum_ = mask.sum((0, 1))
+        masked_avg = (
+            lambda x_, dim: (mask[..., dim, :] * x_[..., dim, :]).sum().detach() / sum_
+        )
+        if self.discrete:
+            entropy = a_dist.entropy().unsqueeze(-1)
+            low_prob = torch.min(a_dist.probs, dim=-1, keepdims=True).values
+            high_prob = torch.max(a_dist.probs, dim=-1, keepdims=True).values
+            return {
+                "Policy Per-timestep Entropy (test-time gamma)": masked_avg(
+                    entropy, -1
+                ),
+                "Policy Per-timstep Low Prob. (test-time gamma)": masked_avg(
+                    low_prob, -1
+                ),
+                "Policy Per-timestep High Prob. (test-time gamma)": masked_avg(
+                    high_prob, -1
+                ),
+                "Policy Overall Highest Prob.": (mask * a_dist.probs).max(),
+            }
+        else:
+            entropy = -a_dist.log_prob(a_dist.sample()).sum(-1, keepdims=True)
+            return {"Policy Entropy (test-time gamma)": masked_avg(entropy, -1)}
+
+    def _filter_stats(self, mask, logp_a, filter_) -> dict:
+        # messy data gathering for wandb console
+        mask = mask[:, :-1, ...]
+
+        def masked_avg(x_, dim=0):
+            return (mask[..., dim, :] * x_[..., dim, :]).sum().detach() / mask[
+                ..., dim, :
+            ].sum()
+
+        binary_filter = filter_ > 0
+        masked_logp_a = logp_a[mask.bool()]
+        stats = {
+            "Minimum Action Logprob": masked_logp_a.min(),
+            "Maximum Action Logprob": masked_logp_a.max(),
+            "Mean Action Logprob": masked_logp_a.mean(),
+            "Filter Max": filter_.max(),
+            "Filter Min": filter_.min(),
+            "Filter Mean": (mask * filter_).sum() / mask.sum(),
+            "Pct. of Actions Approved by Binary FBC Filter (All Gammas)": utils.masked_avg(
+                binary_filter, mask
+            )
+            * 100.0,
+        }
+
+        if filter_.shape[-2] == len(self.gammas):
+            for i, gamma in enumerate(self.gammas):
+                stats[
+                    f"Pct. of Actions Approved by Binary FBC (gamma = {gamma : .3f})"
+                ] = (masked_avg(binary_filter, dim=i) * 100.0)
+        return stats
+
+    def _popart_stats(self) -> dict:
+        # messy data gathering for wandb console
+        return {
+            "PopArt mu (mean over gamma)": self.popart.mu.data.mean().item(),
+            "PopArt nu (mean over gamma)": self.popart.nu.data.mean().item(),
+            "PopArt w (mean over gamma)": self.popart.w.data.mean().item(),
+            "PopArt b (mean over gamma)": self.popart.b.data.mean().item(),
+            "PopArt sigma (mean over gamma)": self.popart.sigma.mean().item(),
+        }
+
+    def _cost_popart_stats(self) -> dict:
+        # messy data gathering for wandb console for cost PopArt
+        if self.constrained_config is None:
+            return {}
+        return {
+            "Cost PopArt mu (mean over gamma)": self.cost_popart.mu.data.mean().item(),
+            "Cost PopArt nu (mean over gamma)": self.cost_popart.nu.data.mean().item(),
+            "Cost PopArt w (mean over gamma)": self.cost_popart.w.data.mean().item(),
+            "Cost PopArt b (mean over gamma)": self.cost_popart.b.data.mean().item(),
+            "Cost PopArt sigma (mean over gamma)": self.cost_popart.sigma.mean().item(),
+        }
+
+    def _cost_td_stats(self, mask, raw_cost_q_s_a_g, cost_q_s_a_g, c, d, cost_td_target) -> dict:
+        # messy data gathering for wandb console for cost critics
+        def masked_avg(x_, dim=0):
+            return (mask[..., dim, :] * x_[..., dim, :]).sum().detach() / mask[
+                ..., dim, :
+            ].sum()
+
+        where_mask = torch.where(mask.all(2, keepdims=True) > 0)
+
+        stats = {}
+        for i, gamma in enumerate(self.gammas):
+            stats[f"Cost Q(s, a) (global mean, rescaled) gamma={gamma:.3f}"] = masked_avg(
+                cost_q_s_a_g, i
+            )
+            stats[f"Cost Q(s,a) (global mean, raw scale) gamma={gamma:.3f}"] = masked_avg(
+                raw_cost_q_s_a_g, i
+            )
+            stats[
+                f"Cost Q(s, a) Ensemble Stdev. (raw scale, ignoring padding) gamma={gamma:.3f}"
+            ] = (raw_cost_q_s_a_g[..., i, :].std(2).mean())
+
+        stats.update(
+            {
+                "Cost Q(s, a) (global std, rescaled, ignoring padding)": cost_q_s_a_g.std(),
+                "Min Cost TD Target": cost_td_target[where_mask].min(),
+                "Max Cost TD Target": cost_td_target[where_mask].max(),
+                "Cost TD Target (test-time gamma)": masked_avg(cost_td_target, -1),
+                "Mean Cost (in training sequences)": masked_avg(c),
+                "Min Cost (in training sequences)": c[where_mask].min(),
+                "Max Cost (in training sequences)": c[where_mask].max(),
+            }
+        )
+        return stats
+
+
+@gin.configurable
+class MultiTaskAgent(Agent):
+    """A variant of Agent aimed at learning from distinct reward functions.
+
+    Strives to balance the training loss across tasks with different return scales
+    without resorting to one-hot task IDs. Standard multi-task RL (e.g., N atari games)
+    are all good examples, but so are multi-domain meta-RL problems like Meta-World ML45.
+    This is the agent discussed in the AMAGO-2 paper.
+
+    Follows the same learning update as Agent, with three main differences:
+
+    1. Converts critic regression to classification of two-hot encoded labels representing
+       bins spaced across a fixed range (see amago.nets.actor_critic.NCriticsTwoHot). The
+       version here closely follows Dreamer-V3.
+
+    2. Converts the discrete setup of Agent (where critics output a vector of vals per action)
+       to the same format as continuous actions (state + action) --> scalar. This avoids large
+       critic outputs layers but removes our ability to directly compute E_{a ~ π}[Q(s, a)].
+
+    3. Defaults to an online_coeff of 0 and an offline_coeff of 1.0. This is because the
+       "online" loss (-Q(s, a ~ pi)) scales with the magnitude of Q. The online loss is
+       still available as long as the output of the actor network uses the reparameterization
+       trick. Discrete actions are supported via a gumbel softmax, but this has seen limited
+       testing.
+
+    The combination of points 2 and 3 stresses accurate advantage estimates and motivates a change
+    in the default value of num_actions_for_value_in_critic_loss from 1 --> 3. Arguments otherwise
+    follow the information listed in :py:class:`~amago.agent.Agent`.
+    """
+
+    def __init__(
+        self,
+        obs_space: gym.spaces.Dict,
+        rl2_space: gym.spaces.Box,
+        action_space: gym.spaces.Space,
+        tstep_encoder_type: Type[TstepEncoder],
+        traj_encoder_type: Type[TrajEncoder],
+        max_seq_len: int,
+        num_critics: int = 4,
+        num_critics_td: int = 2,
+        online_coeff: float = 0.0,
+        offline_coeff: float = 1.0,
+        gamma: float = 0.999,
+        reward_multiplier: float = 10.0,
+        tau: float = 0.003,
+        fake_filter: bool = False,
+        num_actions_for_value_in_critic_loss: int = 1,
+        num_actions_for_value_in_actor_loss: int = 3,
+        fbc_filter_func: callable = binary_filter,
+        popart: bool = True,
+        use_target_actor: bool = True,
+        use_multigamma: bool = True,
+        actor_type: Type[actor_critic.BaseActorHead] = actor_critic.Actor,
+        critic_type: Type[actor_critic.BaseCriticHead] = actor_critic.NCriticsTwoHot,
+    ):
+        super().__init__(
+            obs_space=obs_space,
+            rl2_space=rl2_space,
+            action_space=action_space,
+            max_seq_len=max_seq_len,
+            tstep_encoder_type=tstep_encoder_type,
+            traj_encoder_type=traj_encoder_type,
+            num_critics=num_critics,
+            num_critics_td=num_critics_td,
+            gamma=gamma,
+            reward_multiplier=reward_multiplier,
+            tau=tau,
+            fake_filter=fake_filter,
+            num_actions_for_value_in_critic_loss=num_actions_for_value_in_critic_loss,
+            num_actions_for_value_in_actor_loss=num_actions_for_value_in_actor_loss,
+            online_coeff=online_coeff,
+            offline_coeff=offline_coeff,
+            use_target_actor=use_target_actor,
+            use_multigamma=use_multigamma,
+            fbc_filter_func=fbc_filter_func,
+            popart=popart,
+            actor_type=actor_type,
+            critic_type=critic_type,
+        )
+
+    def _sample_k_actions(self, dist, k: int):
+        raise NotImplementedError
+
+    def forward(self, batch: Batch, log_step: bool):
+        # fmt: off
+        self.update_info = {}  # holds wandb stats
+
+        ##################
+        ## Timestep Emb ##
+        ##################
+        active_log_dict = self.update_info if log_step else None
+        o = self.tstep_encoder(obs=batch.obs, rl2s=batch.rl2s, log_dict=active_log_dict)
+
+        ###################
+        ## Get Organized ##
+        ###################
+        B, L, D_o = o.shape
+        a = batch.actions
+        a = a.clamp(0, 1.0) if self.discrete else a.clamp(-1.0, 1.0)
+        _B, _L, D_action = a.shape
+        assert _L == L - 1
+        G = len(self.gammas)
+        K_c = self.num_actions_for_value_in_critic_loss
+        a_buffer = F.pad(a, (0, 0, 0, 1), "replicate")
+        a_buffer = repeat(a_buffer, f"b l a -> b l {G} a")
+        C = len(self.critics)
+        assert batch.rews.shape == (B, L - 1, 1)
+        assert batch.dones.shape == (B, L - 1, 1)
+        r = repeat((self.reward_multiplier * batch.rews).float(), f"b l r -> b l 1 {G} r")
+        d = repeat(batch.dones.float(), f"b l d -> b l 1 {G} d")
+        gamma = self.gammas.to(r.device).unsqueeze(-1)
+        D_emb = self.traj_encoder.emb_dim
+        Bins = self.critics.num_bins
+        state_mask = (~((batch.rl2s == self.pad_val).all(-1, keepdim=True))).float()[:, 1:, ...]
+        actor_mask = F.pad(state_mask, (0, 0, 0, 1), "constant", 0.0)
+        actor_mask = repeat(actor_mask, f"b l 1 -> b l {G} 1")
+        critic_mask = repeat(state_mask, f"b l 1 -> b l {C} {G} 1")
+
+        ########################
+        ## Sequence Embedding ##
+        ########################
+        s_rep, hidden_state = self.traj_encoder(seq=o, time_idxs=batch.time_idxs, hidden_state=None, log_dict=active_log_dict)
+        assert s_rep.shape == (B, L, D_emb)
+        s_rep_next = s_rep[:, 1:, ...].contiguous()
+
+        ################
+        ## a ~ \pi(s) ##
+        ################
+        a_dist = self.actor(s_rep, log_dict=active_log_dict)
+        if self.discrete:
+            a_dist = DiscreteLikeContinuous(a_dist)
+        if log_step:
+            policy_stats = self._policy_stats(actor_mask, a_dist)
+            self.update_info.update(policy_stats)
+
+        critic_loss = None
+        if not self.fake_filter or self.online_coeff > 0: # if we use the critic to train the actor
+            ################
+            ## TD Targets ##
+            ################
+            with torch.no_grad():
+                if self.use_target_actor:
+                    a_prime_dist = self.target_actor(s_rep)
+                    if self.discrete:
+                        a_prime_dist = DiscreteLikeContinuous(a_prime_dist)
+                else:
+                    a_prime_dist = a_dist
+                ap = a_prime_dist.sample((K_c,)) # a' ~ \pi(s')
+                assert ap.shape == (K_c, B, L, G, D_action)
+                sp_ap_gp = (s_rep_next.detach(), ap[:, :, 1:, ...].contiguous().detach())
+                q_targ_sp_ap_gp = self.target_critics(*sp_ap_gp) # Q(s', a')
+                assert q_targ_sp_ap_gp.probs.shape == (K_c, B, L - 1, C, G, Bins)
+                q_targ_sp_ap_gp = self.target_critics.bin_dist_to_raw_vals(q_targ_sp_ap_gp).mean(0)
+                assert q_targ_sp_ap_gp.shape == (B, L - 1, C, G, 1)
+                # y = r + gamma * (1.0 - d) * Q(s', a')
+                ensemble_td_target = r + gamma * (1.0 - d) * q_targ_sp_ap_gp
+                assert ensemble_td_target.shape == (B, L - 1, C, G, 1)
+                td_target = self._critic_ensemble_to_td_target(ensemble_td_target)
+                assert td_target.shape == (B, L - 1, 1, G, 1)
+                self.popart.update_stats(
+                    td_target, mask=critic_mask.all(2, keepdim=True)
+                )
+                assert td_target.shape == (B, L - 1, 1, G, 1)
+                td_target_labels = self.target_critics.raw_vals_to_labels(td_target)
+                td_target_labels = repeat(
+                    td_target_labels, f"b l 1 g bins -> b l {C} g bins"
+                )
+                assert td_target_labels.shape == (B, L - 1, C, G, Bins)
+
+            #################
+            ## Critic Loss ##
+            #################
+            s_a_g = (s_rep, a_buffer.unsqueeze(0))
+            q_s_a_g = self.critics(*s_a_g, log_dict=active_log_dict) # Q(s, a)
+            assert q_s_a_g.probs.shape == (1, B, L, C, G, Bins)
+            # mean squared bellman error --> cross entropy w/ bin classification labels
+            critic_loss = F.cross_entropy(
+                rearrange(q_s_a_g.logits[0, :, :-1, ...], "b l c g u -> (b l c g) u"),
+                rearrange(td_target_labels, "b l c g u -> (b l c g) u"),
+                reduction="none",
+            )
+            critic_loss = rearrange(
+                critic_loss, "(b l c g) -> b l c g 1", b=B, l=L - 1, c=C, g=G
+            )
+            assert critic_loss.shape == (B, L - 1, C, G, 1)
+            scalar_q_s_a_g = self.critics.bin_dist_to_raw_vals(q_s_a_g).squeeze(0)
+            if log_step:
+                td_stats = self._td_stats(
+                    critic_mask,
+                    self.popart.normalize_values(scalar_q_s_a_g)[:, :-1, ...],
+                    scalar_q_s_a_g[:, :-1, ...],
+                    r=r,
+                    d=d,
+                    td_target=td_target,
+                    raw_q_bins=q_s_a_g.probs[0, :, :-1],
+                )
+                popart_stats = self._popart_stats()
+                self.update_info.update(td_stats | popart_stats)
+
+        actor_loss = 0.0
+        K_a = self.num_actions_for_value_in_actor_loss
+        if self.offline_coeff > 0:
+            #####################################################
+            ## "Offline" (Advantage Weighted/Filtered BC) Loss ##
+            #####################################################
+            if not self.fake_filter:
+                # f(A(s, a))
+                with torch.no_grad():
+                    a_agent = a_dist.sample((K_a,))
+                    q_s_a_agent = self.critics(s_rep.detach(), a_agent)
+                    assert q_s_a_agent.probs.shape == (K_a, B, L, C, G, Bins)
+                    # mean over actions and critic ensemble
+                    val_s = self.critics.bin_dist_to_raw_vals(q_s_a_agent)
+                    assert val_s.shape == (K_a, B, L, C, G, 1)
+                    # A(s, a) = Q(s, a) - V(s) = mean_over_critics(Q(s, a)) - mean_over_critics(mean_over_actions(Q(s, a ~ pi)))
+                    advantage_s_a = scalar_q_s_a_g.mean(2) - val_s.mean((0, 3))
+                    assert advantage_s_a.shape == (B, L, G, 1)
+                    filter_ = self.fbc_filter_func(advantage_s_a)[:, :-1, ...].float()
+                    binary_filter_ = binary_filter(advantage_s_a)[:, :-1, ...].float()
+            else:
+                # Behavior Cloning (f(A(s, a)) = 1)
+                filter_ = binary_filter_ = torch.ones(
+                    (B, L - 1, G, 1), dtype=torch.float32, device=s_rep.device
+                )
+            # log pi(a | s)
+            if self.discrete:
+                logp_a = a_dist.log_prob(a_buffer).unsqueeze(-1)
+            elif self.multibinary:
+                logp_a = a_dist.log_prob(a_buffer).mean(-1, keepdim=True)
+            else:
+                logp_a = a_dist.log_prob(a_buffer).sum(-1, keepdim=True)
+            # throw away last action that was a duplicate
+            logp_a = logp_a[:, :-1, ...]
+            actor_loss += self.offline_coeff * -(filter_.detach() * logp_a)
+            if log_step:
+                filter_stats = self._filter_stats(actor_mask, logp_a, binary_filter_)
+                self.update_info.update(filter_stats)
+
+        if self.online_coeff > 0:
+            #########################
+            ## "Online" (DPG) Loss ##
+            #########################
+            # TODO: possible to recycle this q_val for the FBC loss above, as is done in Agent.
+            # For now, only call rsample when specifically using online_coeff > 0 (since it's usually turned off)
+            assert self.actor.actions_differentiable, "online-style actor loss is not compatible with action distribution"
+            a_agent_dpg = torch.stack([a_dist.rsample() for _ in range(K_a)], dim=0)
+            q_s_a_agent = self.maximized_critics(s_rep.detach(), a_agent_dpg)
+            q_s_a_agent = self.popart.normalize_values(
+                # mean over K actions, min over critic ensemble
+                self.maximized_critics.bin_dist_to_raw_vals(q_s_a_agent).mean(0).min(2).values
+            )
+            actor_loss += self.online_coeff * -(q_s_a_agent[:, :-1, ...])
+        
+
+        return critic_loss, actor_loss
+
+    def _td_stats(
+        self, mask, raw_q_s_a_g, q_s_a_g, r, d, td_target, raw_q_bins
+    ) -> dict:
+        stats = super()._td_stats(
+            mask=mask,
+            raw_q_s_a_g=raw_q_s_a_g,
+            q_s_a_g=q_s_a_g,
+            r=r,
+            d=d,
+            td_target=td_target,
+        )
+        *_, Bins = raw_q_bins.shape
+        max_bin_all_gammas_histogram = raw_q_bins.argmax(-1)[torch.where(mask.all(-1))]
+        max_bin_target_gamma_histogram = raw_q_bins[..., -1, :].argmax(-1)[
+            torch.where(mask[..., -1, :].all(-1))
+        ]
+        stats.update(
+            {
+                "Maximum Bin (All Gammas)": wandb.Histogram(
+                    max_bin_all_gammas_histogram.cpu().numpy(), num_bins=Bins
+                ),
+                "Maximum Bin (Target Gamma)": wandb.Histogram(
+                    max_bin_target_gamma_histogram.cpu().numpy(), num_bins=Bins
+                ),
+            }
+        )
+        return stats

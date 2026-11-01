@@ -1,0 +1,107 @@
+# Shield toggle
+use_shield: false # Set true when evaluating a shielded checkpoint
+run_name: "mujoco_eval"
+ckpt_base_dir: "./checkpoints" # change
+load_checkpoint_epoch: null # Prefer an explicit load_checkpoint_path
+use_wandb: false
+wandb_project: "q-barrier"
+name_postfix: "test" # change
+
+# Shield configuration (only active when use_shield: true)
+shield_config:
+  # Runtime filtering
+  shield_alpha: 1.5
+  shield_safety_margin: 0.0
+  shield_fallback: "policy"
+  shield_warmup_epochs: 0
+  shield_critic_agg: "mean"
+  shield_filter_mode: "soft"
+  shield_soft_beta: 1.0
+  shield_critic_quantile: 0.75
+  shield_continuous_num_samples: 8
+  shield_final_sampling_temperature: 1.0
+  shield_continuous_enable_fast_path: true
+  shield_continuous_mean_exit_margin: 0.0
+  shield_continuous_stage1_num_samples: 3
+  shield_continuous_wide_scale: 2.5
+
+  # Auxiliary training / model construction
+  use_world_model_aux: true
+  wm_hidden_dim: 256
+  wm_nll_weight: 1.0
+  wm_loss_weight: 1.0
+  cbf_smoothness_weight: 0.1
+  latent_distill_weight: 0.1
+  rnd_loss_weight: 0.01
+  epsilon_calib_weight: 0.05
+  epsilon_calib_quantile: 0.95
+  gamma_conjugacy_weight: 0.1
+  cbf_collapse_weight: 0.1
+  detach_structural_losses: true
+
+save_metrics: true
+metrics_file_name: "inner_episode_trends_mujoco.npz"
+ablation_mode: "all"                     # theory_diagnostics|margin_utility|all
+fixed_margin_value: 0.25
+debug_rollouts: 0
+sample_actions: false
+num_ablation_envs: ${num_test_goals}
+id_timesteps_per_epoch: ${val_timesteps_per_epoch}
+ood_timesteps_per_epoch: ${val_timesteps_per_epoch}
+
+env_name: "SafetyCarGoal1-v0"
+env_mode: "sync"
+num_train_goals: 20
+num_test_goals: 100 # change
+time_limit: 75  # change
+max_inner_episodes: 20 # change
+sticky_movement_multiplier: 5 # change
+lidar: false # change
+normalize_reward: true
+replay_capacity: 100000
+seed: 42
+reward_multiplier: 10
+cost_multiplier: .1
+no_video: true
+
+constrained_env_config:
+  train_radial_alpha: 0
+  is_out_of_distribution: true
+  fix_hidden_parameters: false
+  min_ctg: 10 # change
+  max_ctg: 50 # change
+
+constrained_agent_config:
+  fixed_lagrangian_multiplier: 4 
+  # fixed_lagrangian_multiplier: null
+
+  # If not fixed lambda:
+  lambda_lr: 3e-5
+  lambda_init: 0.0
+  lambda_upper_bound: null
+
+  max_unused_fraction: 1
+
+
+max_seq_len: ${eval:'${time_limit} * ${max_inner_episodes}'}
+embedding_dim: 64
+hidden_dim: 64
+num_layers: 4
+num_heads: 8
+
+epochs: 5000
+batch_size: 32 
+learning_rate: 1e-4 
+train_timesteps_per_epoch: ${max_seq_len}
+train_batches_per_epoch: 1000
+val_timesteps_per_epoch: ${eval:'${max_seq_len} * 10'} # change
+mixed_precision: "no"
+start_learning_at_epoch: 0
+
+val_interval: 10
+ckpt_interval: 10
+load_checkpoint_path: null
+
+hydra:
+  run:
+    dir: ${ckpt_base_dir}/${run_name}
