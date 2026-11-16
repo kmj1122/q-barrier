@@ -4,6 +4,19 @@ Code for **Latent Q-Barrier Shielding for Safe In-Context Reinforcement Learning
 
 The repository supports five benchmarks: **DarkRoomHard-v0**, **SafetyPointGoal1-v0**, **SafetyCarGoal1-v0**, **SafetyAntVelocity-v1** and **SafetyHalfCheetahVelocity-v1**. It includes [pretrained policies](pretrained/README.md) for all five, their evaluation configs, and the plotted values of the two main figures.
 
+If you use this code, please cite:
+
+```bibtex
+@inproceedings{
+kwon2026latent,
+title={Latent Q-Barrier Shielding for Safe In-Context Reinforcement Learning},
+author={Kwon, Minjae and Moeini, Amir and Zhang, Shangtong and Feng, Lu},
+booktitle={The Fortieth Annual Conference on Neural Information Processing Systems},
+year={2026},
+url={https://openreview.net/forum?id=hB8HKO6xwv}
+}
+```
+
 ## Installation
 
 Python 3.10 is recommended.
