@@ -22,7 +22,7 @@ shield_config:
   shield_safety_margin: 0.0
   shield_fallback: "policy"
   shield_warmup_epochs: 0
-  shield_critic_agg: "max"
+  shield_critic_agg: "mean"
   shield_filter_mode: "soft"
   shield_score_mode: "barrier" # Alternative scoring rules: cost_penalty or budget_penalty
   shield_log_margins: false    # Log executed-action barrier margin and budget

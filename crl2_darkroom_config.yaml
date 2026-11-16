@@ -19,7 +19,7 @@ shield_config:
   shield_safety_margin: 0.0   # Constant safety margin (subtracted from threshold)
   shield_fallback: "policy" # Action selection if no safe action is found (min_cost or policy)
   shield_warmup_epochs: 0     # Disable shielding for the first N epochs of training
-  shield_critic_agg: "max"  # Aggregate cost critics with max, mean, min, or quantile
+  shield_critic_agg: "mean"  # Aggregate cost critics with max, mean, min, or quantile
   shield_filter_mode: "soft" # Hard mask or soft downweighting of risky actions
   shield_soft_beta: 1.0      # Higher values make soft filtering closer to a hard mask
   shield_score_mode: "barrier" # Alternative scoring rules: cost_penalty or budget_penalty

@@ -40,7 +40,7 @@ shield_config:
   shield_safety_margin: 0.0
   shield_fallback: "policy"
   shield_warmup_epochs: 0
-  shield_critic_agg: "max"
+  shield_critic_agg: "mean"
   # shield_filter_mode: "soft"
   shield_filter_mode: "soft"
   shield_soft_beta: 1.0
