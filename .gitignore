@@ -49,7 +49,5 @@ venv/
 *.pem
 *.key
 scratch*
-rebuttal*
 notes.md
 task_plan.md
-CAMERA_READY_*

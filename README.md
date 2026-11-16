@@ -74,7 +74,7 @@ python crl2_darkroom.py --cfg job --resolve use_shield=true
 - **Context.** `max_inner_episodes` and `time_limit` set the number of episodes and the episode length. `max_seq_len` is derived from both.
 - **Model size.** The model size is set by the constructor defaults, not by the top-level `embedding_dim`, `hidden_dim`, `num_layers` and `num_heads` fields.
 - **Budget.** In Point, Car, Ant and HalfCheetah, the remaining budget resets at every episode. In DarkRoom it does not reset by default. Set `DARKROOM_RESET_BUDGET_PER_INNER_EPISODE=1` to reset it, and use the same setting for training and evaluation.
-- **Candidates.** In continuous-action tasks, `shield_config.shield_continuous_num_samples` sets the number of candidate actions. Velocity training uses 1 and evaluation uses 8. Point and Car use 8 in both.
+- **Candidates.** In continuous-action tasks, `shield_config.shield_continuous_num_samples` sets the number of candidate actions. Training uses 1 and evaluation uses 8.
 
 ## Repository layout
 
@@ -95,6 +95,10 @@ python crl2_darkroom.py --cfg job --resolve use_shield=true
 TORCHDYNAMO_DISABLE=1 python -m pytest tests/
 python scripts/check_pretrained.py
 ```
+
+## Acknowledgements
+
+This code builds on [SCARED](https://github.com/moeiniamir/SCARED), [AMAGO](https://github.com/UT-Austin-RPL/amago) and [Safety-Gymnasium](https://github.com/PKU-Alignment/safety-gymnasium).
 
 ## License
 

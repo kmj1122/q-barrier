@@ -1,4 +1,4 @@
-# Portable evaluation settings from archived shield_darkroom_later; not training metadata.
+# Evaluation config for darkroom.pt.
 use_shield: true
 ckpt_base_dir: ./outputs/evaluation
 load_checkpoint_path: ./pretrained/darkroom.pt
@@ -13,7 +13,7 @@ shield_config:
   shield_safety_margin: 0.0
   shield_fallback: policy
   shield_warmup_epochs: 0
-  shield_critic_agg: mean
+  shield_critic_agg: max
   shield_filter_mode: soft
   shield_soft_beta: 1.0
   shield_critic_quantile: 0.75

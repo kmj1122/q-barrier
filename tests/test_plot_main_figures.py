@@ -1,4 +1,4 @@
-"""Regression checks for CSV-only main-figure rendering."""
+"""Tests for plot_main_figures.py."""
 import csv
 from pathlib import Path
 

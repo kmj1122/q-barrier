@@ -15,12 +15,10 @@ from .agent import Agent
 
 @gin.configurable
 class ShieldedAMAGOAgent(Agent):
-    """AMAGO Agent with a lightweight runtime shield based on cost critics.
+    """AMAGO agent with the Q-Barrier shield.
 
-    The shield is intentionally minimal:
-    - keeps AMAGO training unchanged
-    - only modifies rollout action selection
-    - uses conservative cost-to-go from `cost_critics` to filter unsafe actions
+    It adds the world-model and alignment losses in training and reweights
+    candidate actions with the cost critics at deployment.
     """
 
     def __init__(

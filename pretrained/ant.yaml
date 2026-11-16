@@ -1,4 +1,4 @@
-# Portable evaluation settings from archived eval_q2_margins_ant; not training metadata.
+# Evaluation config for ant.pt.
 use_shield: true
 run_name: pretrained_ant
 ckpt_base_dir: ./outputs/evaluation

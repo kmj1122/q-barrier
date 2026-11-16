@@ -22,13 +22,13 @@ shield_config:
   shield_safety_margin: 0.0
   shield_fallback: "policy"
   shield_warmup_epochs: 0
-  shield_critic_agg: "mean"
+  shield_critic_agg: "max"
   shield_filter_mode: "soft"
   shield_score_mode: "barrier" # Alternative scoring rules: cost_penalty or budget_penalty
   shield_log_margins: false    # Log executed-action barrier margin and budget
   shield_soft_beta: 1.0
   shield_critic_quantile: 0.75
-  shield_continuous_num_samples: 8
+  shield_continuous_num_samples: 1
   shield_continuous_enable_fast_path: true
   shield_continuous_mean_exit_margin: 0.0
   shield_continuous_stage1_num_samples: 3

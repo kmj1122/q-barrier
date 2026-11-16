@@ -1,4 +1,4 @@
-"""CPU checkpoint compatibility and one reset-observation inference; never step environments."""
+"""Check that each pretrained checkpoint loads and returns an action."""
 from __future__ import annotations
 
 import argparse
@@ -150,7 +150,6 @@ def check(name):
             raise ValueError("Expected tensor-only policy state_dict")
         if not all(torch.isfinite(value).all().item() for value in state.values()):
             raise ValueError("Checkpoint contains nonfinite tensors")
-        # All five bundled aliases match exactly: no legacy exceptions or random-head fallback.
         incompatible = policy.load_state_dict(state, strict=True)
         policy.eval()
         obs = {k: torch.from_numpy(v).unsqueeze(1) for k, v in obs.items()}

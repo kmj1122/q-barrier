@@ -1,8 +1,4 @@
-"""Regenerate the two main figures from their shipped plot-ready CSVs only.
-
-No checkpoints, private research checkout, raw trajectories, pandas, or RL
-packages are used. Archived means/band widths are not rescaled or smoothed.
-"""
+"""Redraw the two main figures from the CSVs in data/figures."""
 from __future__ import annotations
 
 import argparse
@@ -69,8 +65,6 @@ def load_curves(path: Path, rq: str) -> tuple[dict, int]:
 
 
 def apply_paper_style() -> None:
-    # The archived PDFs use default DejaVu Sans, not optional SciencePlots serif.
-    # Pinning Matplotlib 3.9.2 also reproduces the original layout/font backend.
     matplotlib.rcdefaults()
     plt.rcParams.update({
         "font.family": "DejaVu Sans", "mathtext.fontset": "dejavusans",
@@ -172,8 +166,7 @@ def main() -> None:
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     report = {"matplotlib_version": matplotlib.__version__, "rescaling": False,
-              "smoothing": False, "raw_experiments_loaded": False,
-              "uncertainty": "Archived shading widths, not newly validated SEM"}
+              "smoothing": False, "raw_experiments_loaded": False}
     for rq in (("RQ1", "RQ2") if args.figure == "both" else (args.figure,)):
         path = args.data_dir / f"{rq}_aggregated_plot_values.csv"
         curves, row_count = load_curves(path, rq)

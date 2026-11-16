@@ -1,8 +1,4 @@
-"""Check configuration loading and optional MuJoCo asset initialization.
-
-No trained policies, optimizer steps, benchmark rollouts, or experiment results.
-The optional asset check only constructs and resets environments, without actions.
-"""
+"""Check that configs load and MuJoCo environments reset."""
 from __future__ import annotations
 
 import argparse

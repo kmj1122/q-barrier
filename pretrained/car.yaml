@@ -1,4 +1,4 @@
-# Portable evaluation settings from archived eval_q2_margins_car; not training metadata.
+# Evaluation config for car.pt.
 use_shield: true
 base_run_name: mujoco_amago
 shield_suffix: ${eval:'"shield" if ${use_shield} else "no_shield"'}
@@ -14,7 +14,7 @@ shield_config:
   shield_safety_margin: 0.0
   shield_fallback: policy
   shield_warmup_epochs: 0
-  shield_critic_agg: mean
+  shield_critic_agg: max
   shield_filter_mode: soft
   shield_score_mode: barrier
   shield_log_margins: true

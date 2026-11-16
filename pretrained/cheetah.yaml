@@ -1,4 +1,4 @@
-# Portable evaluation settings from archived eval_q2_margins_cheetah; not training metadata.
+# Evaluation config for cheetah.pt.
 use_shield: true
 run_name: pretrained_cheetah
 ckpt_base_dir: ./outputs/evaluation
