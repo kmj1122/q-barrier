@@ -1,5 +1,4 @@
 # Q-Barrier
-
 Code for **Latent Q-Barrier Shielding for Safe In-Context Reinforcement Learning** (NeurIPS 2026).
 
 The repository supports five benchmarks: **DarkRoomHard-v0**, **SafetyPointGoal1-v0**, **SafetyCarGoal1-v0**, **SafetyAntVelocity-v1** and **SafetyHalfCheetahVelocity-v1**. It includes [pretrained policies](pretrained/README.md) for all five, their evaluation configs, and the plotted values of the two main figures.
@@ -16,6 +15,16 @@ year={2026},
 url={https://openreview.net/forum?id=hB8HKO6xwv}
 }
 ```
+
+## Disclaimer
+
+- **Code organization:** I have used Claude and ChatGPT to help organize and refactor my original messy code. The current repository is a cleaned-up version of the original implementation, with AI assistance mainly used to remove redundant code and improve code organization.
+
+- **Computational resources:** For the PointGoal and CarGoal experiments, we used an NVIDIA H100 GPU for approximately 7 days, with training continued from saved checkpoints.
+
+- **Random seeds and standard errors:** Due to the heavy computational cost, we used only one random seed for all experiments. The reported standard errors are computed over test layouts, rather than independent training runs. For example, when evaluating on 50 test layouts, the standard error is calculated over those 50 layouts.
+
+This follows the same evaluation approach as the original SCARED paper.
 
 ## Installation
 
